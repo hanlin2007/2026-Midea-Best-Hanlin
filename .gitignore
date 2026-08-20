@@ -1,29 +1,29 @@
-# ---- 模型与数据 ----
-model/
-dataset/
-datasetA/dataset.zip
-
-# ---- 运行产物 ----
-outputs/
-outputs/szy_v1_*.json
-outputs/szy_v1_cache/
-outputs/smoke_*.json
-outputs/submission.json
-outputs/detail.json
-
-# ---- Python ----
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
-venv/
-.env
+.pytest_cache/
 
-# ---- IDE / 系统 ----
+# 本地大型资产（由 README 中的资产清单管理，不进入 Git）
+model/
+dataset/
+
+# 运行产物（缓存的分离 wav、评估输出，可重新生成）
+outputs/
+# 二进制工件（门控 joblib、wesep 权重等，由训练/下载脚本生成）
+artifacts/
+
+# 未使用的实验性 vendor 仓库（自带 .git，当前代码无引用）
+third_party/wesep-real-tse/
+
+# 本地环境
+.venv*/
+
+# IDE / 系统
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# ---- 学习笔记 ----
-learning_notes/
+# 训练日志（wandb 本地目录）
+wandb/

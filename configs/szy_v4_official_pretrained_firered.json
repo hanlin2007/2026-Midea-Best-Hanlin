@@ -1,0 +1,18 @@
+{
+  "device": "cuda:0",
+  "sv_device": null,
+  "model_root": "../model/workspace/midea/models/modelscope",
+  "sv_model": "iic/speech_eres2netv2_sv_zh-cn_16k-common",
+  "cam_model": "iic/speech_campplus_sv_zh-cn_16k-common",
+  "fusion_backend": "../dataset_dasynth/out/gate_fusion.json",
+  "finetuned_sv_ckpt": "../dataset_dasynth/out/ep6_datasetA_best.pt",
+  "fusion_threshold": -0.6469,
+  "firered_model": "../model/external/FireRedASR2-AED",
+  "firered_repo": "../model/external/FireRedASR2S",
+  "firered_vendor": "../model/runtime/vendor",
+  "moss_model": "../exp_sep/clearvoice_ckpt/MossFormer2_SS_16K/last_best_checkpoint.pt",
+  "moss_provider": "auto",
+  "id_mode": "relative_stem",
+  "separation_cache": "outputs/szy_v4_cache_official_pretrained/separation",
+  "batch_writes": 1
+}
