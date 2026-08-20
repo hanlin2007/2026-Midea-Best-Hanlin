@@ -22,11 +22,8 @@ _WS = _REPO.parent
 sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_WS / "model" / "runtime" / "vendor"))
 
-from midea_qiji.infer import (  # noqa: E402
-    FireRedRecognizer,
-    normalize_transcript,
-    suppress_model_output,
-)
+from midea_qiji.recognizers import FireRedRecognizer  # noqa: E402
+from szy_common.helpers import transcribe_firered_rows  # noqa: E402
 
 DATASETA = _WS / "dataset" / "dataset_test" / "datasetA" / "datasetA"
 DETAIL = _REPO / "outputs" / "sweep_v4" / "ep6_detail.json"
@@ -38,23 +35,6 @@ OUT_B = V4SEP / "metadata" / "valid_moss_text.json"
 FIRERED_MODEL = _WS / "model" / "external" / "FireRedASR2-AED"
 FIRERED_REPO = _WS / "model" / "external" / "FireRedASR2S"
 FIRERED_VENDOR = _WS / "model" / "runtime" / "vendor"
-
-
-def transcribe_batch(asr: FireRedRecognizer, paths: list[Path]) -> list[dict]:
-    """与 SzyV2Runner._transcribe 同语义（normalize + confidence）。"""
-    ids = [f"rp_{i}" for i in range(len(paths))]
-    with suppress_model_output():
-        rows = asr._model.transcribe(ids, [str(p) for p in paths])
-    mapped = {str(r.get("uttid")): r for r in rows}
-    out = []
-    for i in ids:
-        row = mapped[i]
-        try:
-            conf = float(row.get("confidence"))
-        except (TypeError, ValueError):
-            conf = 1.0
-        out.append({"text": normalize_transcript(str(row.get("text", ""))), "confidence": conf})
-    return out
 
 
 def part_dataseta(asr: FireRedRecognizer, batch: int) -> None:
@@ -83,7 +63,7 @@ def part_dataseta(asr: FireRedRecognizer, batch: int) -> None:
     for start in range(0, len(todo), batch):
         chunk = todo[start : start + batch]
         paths = [p for _, ps in chunk for p in ps]
-        outs = transcribe_batch(asr, paths)
+        outs = transcribe_firered_rows(asr, paths, "rp")
         for i, (uid, _) in enumerate(chunk):
             raw, c0, c1 = outs[3 * i : 3 * i + 3]
             assets[uid] = {
@@ -104,7 +84,7 @@ def part_valid(asr: FireRedRecognizer, batch: int) -> None:
         chunk = ids[start : start + batch]
         paths = [V4SEP / "valid" / "mos0" / f"{i}.wav" for i in chunk] + \
                 [V4SEP / "valid" / "mos1" / f"{i}.wav" for i in chunk]
-        outs = transcribe_batch(asr, paths)
+        outs = transcribe_firered_rows(asr, paths, "rp")
         n = len(chunk)
         for i, uid in enumerate(chunk):
             out[uid] = {"ms0": outs[i]["text"], "ms1": outs[n + i]["text"]}

@@ -23,7 +23,6 @@ import json
 import random
 import sys
 import time
-from itertools import permutations
 from pathlib import Path
 
 import numpy as np
@@ -40,48 +39,8 @@ SR = 16000
 sys.path.insert(0, str(_REPO_ROOT / "third_party"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from szy_v4.metrics import oracle_sisdr, pit_sisnr_loss  # noqa: E402
 from szy_v4.separator import load_mossformer2_torch  # noqa: E402
-
-
-# ---------------- PIT SI-SNR ----------------
-
-def si_snr(est: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """est/ref: (B, T) -> (B,) SI-SNR"""
-    est = est - est.mean(dim=-1, keepdim=True)
-    ref = ref - ref.mean(dim=-1, keepdim=True)
-    denom = (ref ** 2).sum(dim=-1).clamp_min(1e-12)
-    scale = (est * ref).sum(dim=-1) / denom
-    target = scale.unsqueeze(-1) * ref
-    noise = est - target
-    return 10.0 * torch.log10(
-        (target ** 2).sum(dim=-1) / (noise ** 2).sum(dim=-1).clamp_min(1e-12) + 1e-12
-    )
-
-
-def pit_sisnr_loss(ests: list[torch.Tensor], refs: torch.Tensor) -> torch.Tensor:
-    """ests: list of 2 x (B,T); refs: (B,2,T)。返回最小排列的负 SI-SNR 均值。"""
-    perms = list(permutations(range(2)))
-    vals = []
-    for p in perms:
-        v = si_snr(ests[p[0]], refs[:, 0]) + si_snr(ests[p[1]], refs[:, 1])
-        vals.append(v)
-    stacked = torch.stack(vals, dim=0)  # (P, B)
-    best = stacked.max(dim=0).values
-    return -(best.mean() / 2.0)
-
-
-def si_sdr_np(est: np.ndarray, ref: np.ndarray) -> float:
-    n = min(len(est), len(ref))
-    est = est[:n].astype(np.float64)
-    ref = ref[:n].astype(np.float64)
-    est -= est.mean()
-    ref -= ref.mean()
-    d = float(ref @ ref)
-    if d < 1e-12:
-        return float("nan")
-    t = float(est @ ref) / d * ref
-    no = est - t
-    return 10.0 * np.log10(float(t @ t) / max(float(no @ no), 1e-18))
 
 
 # ---------------- 数据 ----------------
@@ -136,10 +95,7 @@ def evaluate(model, data_root: Path, valid_meta: list[dict], n: int, device: str
         with torch.autocast("cuda", dtype=torch.bfloat16):
             out = model(torch.from_numpy(mix).to(device)[None, :])
         ests = [o.squeeze(0).float().cpu().numpy() for o in out]
-        best = max(
-            np.mean([si_sdr_np(ests[p[0]], refs[0]), si_sdr_np(ests[p[1]], refs[1])])
-            for p in permutations(range(2))
-        )
+        best = oracle_sisdr(ests, refs)
         recs.append({
             "v": best,
             "reverb": any(m["corruption"].get("reverb", [False, False])),

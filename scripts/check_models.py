@@ -1,43 +1,27 @@
 #!/usr/bin/env python3
-"""Verify the model registry and detect residual model files outside model/."""
+"""模型资产完整性自检：按 model/MANIFEST.json 校验资产 + 发现 model/ 外残留权重。
+
+校验内容：canonical 资产存在、兼容软链指向正确、目录字节数/文件数一致、
+文件 sha256 一致、外部依赖软链存在；随后扫描工作区，报告未纳入 model/
+管理的残留权重文件。哈希/目录统计/排除规则与资产搬迁工具
+relocate_workspace_models.py 共用同一实现，避免双份口径漂移。
+
+用法（仓库根目录）：
+  python scripts/check_models.py
+"""
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
-from pathlib import Path
 
 from relocate_workspace_models import (
-    EXCLUDED_PARTS,
-    EXCLUDED_TOP_LEVEL,
     WEIGHT_SCAN_ROOTS,
     WEIGHT_SUFFIXES,
+    directory_stats,
+    is_excluded,
+    sha256,
     workspace_root,
 )
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def directory_stats(path: Path) -> tuple[int, int]:
-    total = 0
-    count = 0
-    for item in path.rglob("*"):
-        if item.is_file() and not item.is_symlink():
-            total += item.stat().st_size
-            count += 1
-    return total, count
-
-
-def is_excluded(relative: Path) -> bool:
-    if not relative.parts or relative.parts[0] in EXCLUDED_TOP_LEVEL:
-        return True
-    return any(part in EXCLUDED_PARTS or part.startswith(".venv-") for part in relative.parts)
 
 
 def main() -> None:

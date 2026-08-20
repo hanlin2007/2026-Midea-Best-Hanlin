@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .infer import levenshtein, normalize_transcript
+from .text import levenshtein, normalize_transcript
 
 
 DECISION_SCHEMA_VERSION = "moss-candidate-reproduction-v1"

@@ -1,3 +1,10 @@
+"""冻结决策规则（唤醒锚点选择 / 候选切换）的单元测试（numpy-only）。
+
+这些测试锁死历史离线结果的决策边界，任何改动导致失败都意味着复现被破坏。
+
+运行（仓库根目录）：
+  PYTHONPATH=src python -m unittest tests.test_moss_candidate -v
+"""
 from __future__ import annotations
 
 import unittest

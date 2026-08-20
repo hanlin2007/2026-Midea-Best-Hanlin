@@ -32,9 +32,10 @@ sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_WS / "model" / "runtime" / "vendor"))
 
 from midea_qiji.gate import ModelScopeEmbedder, read_wav  # noqa: E402
-from midea_qiji.infer import levenshtein, normalize_transcript, resolve_model_path  # noqa: E402
 from midea_qiji.moss_candidate import should_switch_command_timbre  # noqa: E402
-from szy_v1.pipeline import _command_features, _duration  # noqa: E402
+from midea_qiji.paths import resolve_model_path  # noqa: E402
+from midea_qiji.text import levenshtein, normalize_transcript  # noqa: E402
+from szy_common.helpers import command_features, duration_seconds  # noqa: E402
 
 DATASETA = _WS / "dataset" / "dataset_test" / "datasetA" / "datasetA"
 DETAIL = _REPO / "outputs" / "sweep_v4" / "ep6_detail.json"
@@ -290,7 +291,7 @@ def replay(samples, fused: dict[str, float], fts: dict[str, dict], threshold: fl
             continue
         f = fts[s["id"]]
         sv_diff = max(f["ft_cos_cmd0"], f["ft_cos_cmd1"]) - f["ft_rawcmd"]
-        cps, kw = _command_features(s["raw_text"], _duration(s["cmd_audio"]))
+        cps, kw = command_features(s["raw_text"], duration_seconds(s["cmd_audio"]))
         switch = should_switch_command_timbre(
             confidence=s["raw_confidence"], command_keyword_score=kw, sv_diff=sv_diff)
         if switch and not s["command_source_empty"]:

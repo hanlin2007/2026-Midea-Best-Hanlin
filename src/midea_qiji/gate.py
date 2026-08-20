@@ -3,6 +3,9 @@
 特征定义与训练端（sv_backend/extract_features.py）严格一致：
 整段余弦 + 滑窗（1.0s/0.2s）余弦统计 + 时长/能量/削波，每个模型 16 维，拼接成 32 维。
 裁判为 32->32->16->1 的 MLP，权重与标准化参数来自 backend_dual.pt。
+
+read_wav / SAMPLE_RATE 的 canonical 定义在 midea_qiji.audio（本模块 re-export
+以兼容 ``from midea_qiji.gate import read_wav`` 旧导入路径）。
 """
 from __future__ import annotations
 
@@ -12,23 +15,13 @@ from typing import Sequence
 
 import numpy as np
 
-SAMPLE_RATE = 16000
+from midea_qiji.audio import SAMPLE_RATE, read_wav  # noqa: F401  (re-export)
 
 FEATURE_KEYS = [
     "cos_whole", "n_windows", "win_max", "win_mean", "win_std", "win_top3_mean",
     "win_count_ge_25", "win_count_ge_30", "win_count_ge_35", "win_frac_ge_30", "win_span_ge_30",
     "enroll_seconds", "test_seconds", "rms_ratio", "clip_ratio_enroll", "clip_ratio_test",
 ]
-
-
-def read_wav(path: str | Path) -> np.ndarray:
-    import wave
-
-    with wave.open(str(path), "rb") as handle:
-        if handle.getframerate() != SAMPLE_RATE or handle.getnchannels() != 1:
-            raise ValueError(f"unsupported wav format: {path}")
-        raw = handle.readframes(handle.getnframes())
-    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
@@ -136,7 +129,7 @@ class DualMLPGate:
         import torch
         from torch import nn
 
-        from midea_qiji.infer import resolve_model_path
+        from midea_qiji.paths import resolve_model_path
 
         self.threshold = threshold
         self.eres_embedder = ModelScopeEmbedder(resolve_model_path(sv_model, model_root), device)

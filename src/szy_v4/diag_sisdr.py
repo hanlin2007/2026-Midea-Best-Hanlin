@@ -17,24 +17,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from szy_v4.metrics import si_sdr
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = _REPO_ROOT.parent / "dataset_dasynth"
-
-
-def si_sdr(est: np.ndarray, ref: np.ndarray) -> float:
-    n = min(len(est), len(ref))
-    est = est[:n].astype(np.float64) - np.mean(est[:n])
-    ref = ref[:n].astype(np.float64) - np.mean(ref[:n])
-    denom = float(ref @ ref)
-    if denom < 1e-12:
-        return float("nan")
-    scale = float(est @ ref) / denom
-    target = scale * ref
-    noise = est - target
-    nden = float(noise @ noise)
-    if nden < 1e-18:
-        return 60.0
-    return 10.0 * np.log10(float(target @ target) / nden + 1e-18)
 
 
 def main() -> None:

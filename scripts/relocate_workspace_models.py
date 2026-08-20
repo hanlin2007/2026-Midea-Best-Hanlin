@@ -179,7 +179,6 @@ def apply(root: Path) -> dict[str, object]:
     conflicts = [entry for entry in entries if entry["status"] == "conflict"]
     if conflicts:
         raise RuntimeError(f"migration conflicts: {conflicts}")
-    model_root = root / "model" / "workspace"
     records = []
     for entry in entries:
         source = root / str(entry["source"])

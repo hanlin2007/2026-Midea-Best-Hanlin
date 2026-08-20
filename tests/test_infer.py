@@ -1,3 +1,8 @@
+"""midea_qiji 基线数据/文本/报告口径的单元测试（numpy-only，无需模型）。
+
+运行（仓库根目录）：
+  PYTHONPATH=src python -m unittest tests.test_infer -v
+"""
 from __future__ import annotations
 
 import json
@@ -6,7 +11,7 @@ import tempfile
 import unittest
 
 from midea_qiji.infer import Sample, normalize_transcript, read_many_jsonl, submission_id, write_reports
-from szy_v1.pipeline import summarize, write_outputs
+from szy_common.reporting import summarize, write_outputs
 
 
 class InferTest(unittest.TestCase):

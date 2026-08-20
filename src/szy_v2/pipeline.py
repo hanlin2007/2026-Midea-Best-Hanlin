@@ -26,12 +26,16 @@ MossFormer2 candidate selection).  Three changes relative to v1:
 
 Everything else (wake anchor, raw fallbacks, output schema) is identical
 to szy_v1.
+
+v2 是现役管线的引擎：szy_v4 直接复用本模块的 main()。共享工具来自
+szy_common；ONNX 分离器沿用 szy_v1 的实现（正向阶段依赖）；torch 分离器
+（dasynth 微调）属 szy_v4 资产，仅在 moss_model 指向 .pt 时延迟导入，
+避免 v2→v4 的常驻反向依赖。
 """
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 import time
@@ -42,30 +46,25 @@ from tqdm.auto import tqdm
 
 from midea_qiji.gate import ModelScopeEmbedder, read_wav
 from midea_qiji.infer import (
-    FireRedLLMRecognizer,
-    FireRedRecognizer,
     Sample,
-    levenshtein,
-    normalize_transcript,
     read_many_jsonl,
-    resolve_model_path,
     submission_id,
 )
 from midea_qiji.moss_candidate import (
-    WakeAnchorDecision,
     select_wake_anchor,
     should_switch_command_timbre,
 )
-from szy_v1.pipeline import (
-    CMD_KW,
-    MossFormer2Separator,
-    MossFormer2TorchSeparator,
-    SzyConfig,
-    _command_features,
-    _duration,
-    summarize,
-    write_outputs,
+from midea_qiji.paths import resolve_model_path
+from midea_qiji.recognizers import FireRedLLMRecognizer, FireRedRecognizer
+from szy_common.helpers import (
+    command_features,
+    duration_seconds,
+    separation_paths_for,
+    sha256_file,
+    transcribe_firered_rows,
 )
+from szy_common.reporting import summarize, write_outputs
+from szy_v1.pipeline import MossFormer2Separator, SzyConfig
 
 
 FUSION_FEATURE_KEYS = [
@@ -93,14 +92,6 @@ def load_szy_v2_config(path: str | Path) -> SzyV2Config:
     if unknown:
         raise ValueError(f"unknown szy_v2 config keys: {unknown}")
     return SzyV2Config(**payload)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _cosine(left: np.ndarray, right: np.ndarray) -> float:
@@ -184,7 +175,9 @@ class SzyV2Runner:
         )
         # 候选选择复用门控的 ft 逐通道余弦（ft 直接余弦规则），无需 cam++ 前端
         if str(config.moss_model).endswith(".pt"):
-            # dasynth 域适配微调的 torch 分离器（整波推理，同接口）
+            # dasynth 域适配微调的 torch 分离器（szy_v4 资产），延迟导入避免常驻依赖
+            from szy_v4.separator import MossFormer2TorchSeparator
+
             self.separator = MossFormer2TorchSeparator(config.moss_model, config.device)
         else:
             self.separator = MossFormer2Separator(config.moss_model, config.device, config.moss_provider)
@@ -204,42 +197,8 @@ class SzyV2Runner:
                 config.firered_vendor,
             )
 
-    @staticmethod
-    def _transcribe(asr: Any, paths: list[Path]) -> list[dict[str, Any]]:
-        from midea_qiji.infer import suppress_model_output
-
-        if not paths:
-            return []
-        utterance_ids = [f"szy2_{index}" for index in range(len(paths))]
-        with suppress_model_output():
-            rows = asr._model.transcribe(utterance_ids, [str(path) for path in paths])
-        mapped = {str(row.get("uttid")): row for row in rows}
-        if len(mapped) != len(paths):
-            raise RuntimeError("FireRed returned an unexpected result count")
-        output = []
-        for identifier in utterance_ids:
-            row = mapped[identifier]
-            confidence = row.get("confidence")
-            try:
-                confidence = float(confidence)
-                if not np.isfinite(confidence):
-                    confidence = 1.0
-            except (TypeError, ValueError):
-                confidence = 1.0
-            output.append({
-                "text": normalize_transcript(str(row.get("text", ""))),
-                "confidence": confidence,
-            })
-        return output
-
     def _paths_for(self, sample: Sample) -> tuple[tuple[Path, Path], tuple[Path, Path]]:
-        item_id = submission_id(sample, self.config.id_mode).replace("/", "_")
-        wake_prefix = self.cache_dir / f"{item_id}_wake"
-        command_prefix = self.cache_dir / f"{item_id}_command"
-        return (
-            self.separator.separate(sample.wake_audio, wake_prefix),
-            self.separator.separate(sample.command_audio, command_prefix),
-        )
+        return separation_paths_for(sample, self.config.id_mode, self.cache_dir, self.separator)
 
     def process(self, sample: Sample) -> dict[str, Any]:
         started = time.perf_counter()
@@ -266,9 +225,10 @@ class SzyV2Runner:
         }
         try:
             (wake_paths, command_paths) = self._paths_for(sample)
-            wake0, wake1, command0, command1 = self._transcribe(
+            wake0, wake1, command0, command1 = transcribe_firered_rows(
                 self.asr,
                 [wake_paths[0], wake_paths[1], command_paths[0], command_paths[1]],
+                "szy2",
             )
             # 门控唤醒锚点：生产同一规则（一路为空回退原始 kws）
             # 注：曾验证"非空通道直选"（PR/CER 更优），但在计分公式 (1−CER+RR)/2 下
@@ -298,9 +258,9 @@ class SzyV2Runner:
                 return result
 
             # ---- 接受分支：raw ASR + 音色触发（与 v1 的语速规则不同） ----
-            raw_command = self._transcribe(self.asr, [sample.command_audio])[0]
-            chars_per_sec, command_keyword_score = _command_features(
-                raw_command["text"], _duration(sample.command_audio)
+            raw_command = transcribe_firered_rows(self.asr, [sample.command_audio], "szy2")[0]
+            chars_per_sec, command_keyword_score = command_features(
+                raw_command["text"], duration_seconds(sample.command_audio)
             )
             # sv_diff：分离后目标嗓音浓度 − 原始混合中的浓度（复用门控已算余弦）
             sv_diff = max(gate_values["ft_cos_cmd0"], gate_values["ft_cos_cmd1"]) \
@@ -424,9 +384,9 @@ def main() -> None:
         "data_root": str(Path(args.data_root).resolve()),
         "jsonl": [str(Path(path).resolve()) for path in args.jsonl],
         "sample_count": len(results),
-        "moss_model_sha256": _sha256(Path(config.moss_model).resolve()),
-        "fusion_backend_sha256": _sha256(Path(config.fusion_backend).resolve()),
-        "finetuned_sv_ckpt_sha256": _sha256(Path(config.finetuned_sv_ckpt).resolve()),
+        "moss_model_sha256": sha256_file(Path(config.moss_model).resolve()),
+        "fusion_backend_sha256": sha256_file(Path(config.fusion_backend).resolve()),
+        "finetuned_sv_ckpt_sha256": sha256_file(Path(config.finetuned_sv_ckpt).resolve()),
         "output": str(Path(args.output).resolve()),
         "detail": str(Path(args.final_output).resolve()),
         "checkpoint": str(checkpoint_path.resolve()),

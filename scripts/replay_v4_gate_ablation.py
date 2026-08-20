@@ -26,8 +26,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from midea_qiji.infer import levenshtein as lev  # noqa: E402
-from midea_qiji.infer import normalize_transcript  # noqa: E402
+from midea_qiji.text import levenshtein as lev  # noqa: E402
+from midea_qiji.text import normalize_transcript  # noqa: E402
 
 FEATURES = ["pre_raw", "ft_raw", "pre_sep", "ft_sep", "ch_sim_pre", "ch_sim_ft"]
 # 历史外部标定阈值（非 DatasetA 调出）

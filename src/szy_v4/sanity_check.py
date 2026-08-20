@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from itertools import permutations
 from pathlib import Path
 
 import numpy as np
@@ -25,34 +24,12 @@ import sys
 sys.path.insert(0, str(_REPO_ROOT / "third_party"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from szy_v4.metrics import oracle_sisdr  # noqa: E402
 from szy_v4.separator import load_mossformer2_torch  # noqa: E402
 
 DEFAULT_ROOT = _REPO_ROOT.parent / "dataset_dasynth"
 DEFAULT_CKPT = (_REPO_ROOT.parent / "exp_sep" / "clearvoice_ckpt"
                 / "MossFormer2_SS_16K" / "last_best_checkpoint.pt")
-
-
-def si_sdr(est: np.ndarray, ref: np.ndarray) -> float:
-    n = min(len(est), len(ref))
-    est = est[:n].astype(np.float64)
-    ref = ref[:n].astype(np.float64)
-    est -= est.mean()
-    ref -= ref.mean()
-    d = float(ref @ ref)
-    if d < 1e-12:
-        return float("nan")
-    t = float(est @ ref) / d * ref
-    no = est - t
-    return 10.0 * np.log10(float(t @ t) / max(float(no @ no), 1e-18))
-
-
-def oracle_sisdr(ests: list[np.ndarray], refs: list[np.ndarray]) -> float:
-    best = None
-    for p in permutations(range(2)):
-        v = float(np.mean([si_sdr(ests[p[i]], refs[i]) for i in range(2)]))
-        if best is None or v > best:
-            best = v
-    return best
 
 
 def main() -> None:

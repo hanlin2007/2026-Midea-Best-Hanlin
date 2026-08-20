@@ -7,6 +7,8 @@
 DatasetA 风格合成对，腐蚀前干净源为训练目标）上微调后的 torch 版本。
 
 组成：
+  - ``metrics.py``           分离质量指标（si_sdr / oracle_sisdr / si_snr /
+                             pit_sisnr_loss 的唯一实现，供其余文件共享）；
   - ``separator.py``        torch 分离器（与 ONNX 版同接口，产线接入点）；
   - ``train_mossformer2.py`` dasynth 域适配微调训练（PIT SI-SNR）；
   - ``diag_sisdr.py``        分离质量诊断（按腐蚀类型分组的 SI-SDR 水位）；

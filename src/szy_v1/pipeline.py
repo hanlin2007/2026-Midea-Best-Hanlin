@@ -10,15 +10,19 @@ as the fallback for every failure or empty source.
 This module deliberately runs from the DatasetA JSONL/audio inputs.  It does
 not consume the historical ``exp_sep`` caches, so its output is suitable for
 an end-to-end A/B run and includes a restartable checkpoint.
+
+本模块只保留 v1 独有逻辑（SzyConfig、ONNX 分离器、主流程）；文件哈希 /
+指令特征 / FireRed 转写 / 评测写出等共享工具已收敛到 szy_common，
+语义与原实现逐字一致。注意：v1 依赖的私有资产（backend_dual.pt、
+ONNX MossFormer2 模型）未随仓库分发，本路线处于休眠状态，仅作历史与
+教学保留；现役路线请走 szy_v4。
 """
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
-import re
 import time
 from typing import Any
 
@@ -26,28 +30,29 @@ import numpy as np
 import soundfile as sf
 from tqdm.auto import tqdm
 
+from midea_qiji.audio import SAMPLE_RATE
 from midea_qiji.gate import DualMLPGate, read_wav
 from midea_qiji.infer import (
-    FireRedRecognizer,
     Sample,
-    levenshtein,
-    normalize_transcript,
     read_many_jsonl,
     submission_id,
-    suppress_model_output,
 )
 from midea_qiji.moss_candidate import select_wake_anchor, should_switch_command
+from midea_qiji.recognizers import FireRedRecognizer
+from szy_common.helpers import (
+    command_features,
+    duration_seconds,
+    read_mono_16k,
+    separation_paths_for,
+    sha256_file,
+    transcribe_firered_rows,
+)
+from szy_common.reporting import summarize, write_outputs  # noqa: F401  (re-export)
 
 
-SAMPLE_RATE = 16000
 DEFAULT_MOSS_MODEL = (
     "../model/workspace/midea/models/modelscope/"
     "dengcunqin/speech_mossformer2_separation_temporal_16k/simple_model.onnx"
-)
-CMD_KW = re.compile(
-    r"打开|关闭|关掉|调到|空调|灯光?|窗帘|音乐|电视|风扇|加湿|净化|扫地|"
-    r"温度|音量|模式|洗衣|烘干|冰箱|热水|新风|播放|暂停|继续|小声|大声|"
-    r"亮度|风速|洗澡|叫醒|闹钟|出门|回家|晚安"
 )
 
 
@@ -79,14 +84,6 @@ def load_szy_config(path: str | Path) -> SzyConfig:
     return SzyConfig(**payload)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 class MossFormer2Separator:
     """Small ONNX wrapper matching the historical MossFormer2 invocation."""
 
@@ -111,25 +108,13 @@ class MossFormer2Separator:
         self.session = ort.InferenceSession(str(model), providers=providers)
         self.input_name = self.session.get_inputs()[0].name
 
-    @staticmethod
-    def _waveform(path: Path) -> np.ndarray:
-        waveform, rate = sf.read(str(path), dtype="float32", always_2d=False)
-        if rate != SAMPLE_RATE:
-            raise ValueError(f"expected 16 kHz audio, got {rate}: {path}")
-        if waveform.ndim == 2:
-            waveform = waveform.mean(axis=1)
-        waveform = np.asarray(waveform, dtype=np.float32)
-        if waveform.size == 0 or not np.isfinite(waveform).all():
-            raise ValueError(f"invalid audio waveform: {path}")
-        return waveform
-
     def separate(self, source: Path, output_prefix: Path) -> tuple[Path, Path]:
         output_prefix.parent.mkdir(parents=True, exist_ok=True)
         outputs = (output_prefix.with_name(output_prefix.name + "_ms0.wav"),
                    output_prefix.with_name(output_prefix.name + "_ms1.wav"))
         if all(path.is_file() for path in outputs):
             return outputs
-        waveform = self._waveform(source)
+        waveform = read_mono_16k(source)
         separated = self.session.run(None, {self.input_name: waveform[np.newaxis, :]})[0]
         array = np.asarray(separated)
         if array.ndim != 3 or array.shape[0] < 1 or array.shape[2] < 2:
@@ -141,30 +126,6 @@ class MossFormer2Separator:
                 signal = signal / peak * 0.5
             sf.write(str(output_path), signal, SAMPLE_RATE, subtype="PCM_16")
         return outputs
-
-
-# torch 版分离器（dasynth 域适配微调权重）的 canonical 实现在 szy_v4.separator；
-# 此处 re-export 以保持 szy_v1/szy_v2 既有 import 路径不变。
-from szy_v4.separator import MossFormer2TorchSeparator  # noqa: E402,F401
-
-
-def _duration(path: Path) -> float:
-    info = sf.info(str(path))
-    return float(info.frames) / max(int(info.samplerate), 1)
-
-
-def _command_features(text: str, duration: float) -> tuple[float, float]:
-    normalized = normalize_transcript(text)
-    return float(len(normalized) / max(duration, 0.1)), float(len(CMD_KW.findall(normalized)))
-
-
-def _asr_confidence(row: dict[str, Any]) -> float:
-    value = row.get("confidence")
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return 1.0
-    return value if np.isfinite(value) else 1.0
 
 
 class SzyV1Runner:
@@ -190,33 +151,8 @@ class SzyV1Runner:
             config.firered_vendor,
         )
 
-    @staticmethod
-    def _transcribe(asr: FireRedRecognizer, paths: list[Path]) -> list[dict[str, Any]]:
-        if not paths:
-            return []
-        utterance_ids = [f"szy_{index}" for index in range(len(paths))]
-        with suppress_model_output():
-            rows = asr._model.transcribe(utterance_ids, [str(path) for path in paths])
-        mapped = {str(row.get("uttid")): row for row in rows}
-        if len(mapped) != len(paths):
-            raise RuntimeError("FireRed returned an unexpected result count")
-        output = []
-        for identifier in utterance_ids:
-            row = mapped[identifier]
-            output.append({
-                "text": normalize_transcript(str(row.get("text", ""))),
-                "confidence": _asr_confidence(row),
-            })
-        return output
-
     def _paths_for(self, sample: Sample) -> tuple[tuple[Path, Path], tuple[Path, Path]]:
-        item_id = submission_id(sample, self.config.id_mode).replace("/", "_")
-        wake_prefix = self.cache_dir / f"{item_id}_wake"
-        command_prefix = self.cache_dir / f"{item_id}_command"
-        return (
-            self.separator.separate(sample.wake_audio, wake_prefix),
-            self.separator.separate(sample.command_audio, command_prefix),
-        )
+        return separation_paths_for(sample, self.config.id_mode, self.cache_dir, self.separator)
 
     def process(self, sample: Sample) -> dict[str, Any]:
         started = time.perf_counter()
@@ -251,9 +187,9 @@ class SzyV1Runner:
             # separation until it is actually needed; this is decision
             # equivalent to the historical cached pipeline but avoids four
             # unnecessary candidate transcriptions for raw-kept samples.
-            raw_command = self._transcribe(self.asr, [sample.command_audio])[0]
-            chars_per_sec, command_keyword_score = _command_features(
-                raw_command["text"], _duration(sample.command_audio)
+            raw_command = transcribe_firered_rows(self.asr, [sample.command_audio], "szy")[0]
+            chars_per_sec, command_keyword_score = command_features(
+                raw_command["text"], duration_seconds(sample.command_audio)
             )
             switch = should_switch_command(
                 confidence=raw_command["confidence"],
@@ -275,9 +211,10 @@ class SzyV1Runner:
                 return result
 
             (wake_paths, command_paths) = self._paths_for(sample)
-            wake0, wake1, command0, command1 = self._transcribe(
+            wake0, wake1, command0, command1 = transcribe_firered_rows(
                 self.asr,
                 [wake_paths[0], wake_paths[1], command_paths[0], command_paths[1]],
+                "szy",
             )
             anchor = select_wake_anchor(sample.wake_text, wake0["text"], wake1["text"])
             anchor_path = sample.wake_audio if anchor.raw_wake_fallback else wake_paths[anchor.selected_source]
@@ -344,84 +281,6 @@ class SzyV1Runner:
         return result
 
 
-def summarize(results: list[dict[str, Any]], duration: float) -> dict[str, Any]:
-    positive = [row for row in results if row.get("label") is not None and row.get("label") != ""]
-    negative = [row for row in results if row.get("label") is None or row.get("label") == ""]
-    errors = sum(
-        levenshtein(
-            normalize_transcript(str(row.get("content") or "")),
-            normalize_transcript(str(row["label"])),
-        )
-        for row in positive
-    )
-    characters = sum(len(normalize_transcript(str(row["label"]))) for row in positive)
-    nonempty = sum(bool(str(row.get("content") or "")) for row in positive)
-    rejects = sum(not str(row.get("content") or "") for row in negative)
-    routes: dict[str, int] = {}
-    for row in results:
-        routes[row.get("route", "unknown")] = routes.get(row.get("route", "unknown"), 0) + 1
-    return {
-        "route": "szy_v1",
-        "sample_count": len(results),
-        "positive_count": len(positive),
-        "positive_nonempty": nonempty,
-        "final_pr": nonempty / len(positive) if positive else 0.0,
-        "negative_count": len(negative),
-        "negative_rejects": rejects,
-        "final_rr": rejects / len(negative) if negative else 0.0,
-        "errors": errors,
-        "characters": characters,
-        "final_cer": errors / characters if characters else 0.0,
-        "duration": duration,
-        "routes": routes,
-        "switches": sum(bool(row.get("switch_triggered")) for row in results),
-        "separation_errors": sum(bool(row.get("error")) for row in results),
-    }
-
-
-def write_outputs(results: list[dict[str, Any]], summary: dict[str, Any], output: Path, detail: Path) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    detail.parent.mkdir(parents=True, exist_ok=True)
-    submission = []
-    details = []
-    for row in results:
-        label = row.get("label")
-        if label is not None and label != "":
-            reference = normalize_transcript(str(label))
-            hypothesis = normalize_transcript(str(row.get("content") or ""))
-            item_cer = (
-                levenshtein(hypothesis, reference) / len(reference)
-                if reference else float(hypothesis != "")
-            )
-        else:
-            item_cer = None
-        submission.append({
-            "id": row["id"],
-            "content": str(row.get("content") or ""),
-            "label": label,
-            "cer": item_cer,
-        })
-        item = dict(row)
-        item["cer"] = item_cer
-        details.append(item)
-    output.write_text(
-        json.dumps(
-            {
-                "result": {
-                    "results": submission,
-                    "avg_cer": float(summary["final_cer"]),
-                    "avg_rr": float(summary["final_rr"]),
-                    "duration": round(float(summary["duration"]) * 1000.0, 3),
-                }
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    detail.write_text(json.dumps({"summary": summary, "results": details}, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SZY v1 formal MossFormer2 target-speaker ASR")
     parser.add_argument("--data-root", required=True)
@@ -473,8 +332,8 @@ def main() -> None:
         "data_root": str(Path(args.data_root).resolve()),
         "jsonl": [str(Path(path).resolve()) for path in args.jsonl],
         "sample_count": len(results),
-        "moss_model_sha256": _sha256(Path(config.moss_model).resolve()),
-        "dual_backend_sha256": _sha256(Path(config.dual_backend).resolve()),
+        "moss_model_sha256": sha256_file(Path(config.moss_model).resolve()),
+        "dual_backend_sha256": sha256_file(Path(config.dual_backend).resolve()),
         "output": str(Path(args.output).resolve()),
         "detail": str(Path(args.final_output).resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
