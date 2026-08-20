@@ -2,6 +2,7 @@
 """SZY v1 一键启动器：自动把 src/ 加入模块搜索路径并切到仓库根目录。
 
 ================================================================================
+
 【为什么需要这个文件？】
 
 项目采用 src/ 布局：真正的包在 src/midea_qiji 和 src/szy_v1 里。直接执行
@@ -9,7 +10,13 @@
     python -m szy_v1.pipeline
 
 会报 ModuleNotFoundError，因为 Python 默认不会去 src/ 里找包（除非你设了
-PYTHONPATH=src 或执行了 pip install -e .）。
+PYTHONPATH=src 或执行了 pip install -e .）
+
+（也可用 bash scripts/run_szy_v1.sh，它内部做了同样的事。）
+
+另一种等价方案（一次性）：pip install -e .  之后 python -m szy_v1.pipeline 也能直接跑。
+
+
 
 本启动器做两件事，让你在任何目录都能跑：
   1. sys.path.insert(0, "src")  —— 让 import midea_qiji / import szy_v1 找得到
@@ -25,15 +32,15 @@ PYTHONPATH=src 或执行了 pip install -e .）。
         --final-output outputs/smoke_detail.json \
         --checkpoint-output outputs/smoke_checkpoint.json \
         --manifest-output outputs/smoke_manifest.json
-
+dataset/dataset_test/datasetX/
   全量运行：
-    python run_szy_v1.py --data-root dataset/dataset_test/datasetA/datasetA \
+    python run_szy_v1.py --data-root dataset/dataset_test/datasetA/datasetA 
         --jsonl dataset/dataset_test/datasetA/datasetA/pos.jsonl \
         --jsonl dataset/dataset_test/datasetA/datasetA/neg.jsonl
 
-（也可继续用 bash scripts/run_szy_v1.sh，它内部做了同样的事。）
-
-另一种等价方案（一次性）：pip install -e .  之后 python -m szy_v1.pipeline 也能直接跑。
+    python run_szy_v1.py --data-root dataset/dataset_test/datasetX/datasetX_sample_expr
+        --jsonl dataset/dataset_test/datasetX_sample_expr/pos.jsonl \
+        --jsonl dataset/dataset_test/datasetX_sample_expr/neg.jsonl
 ================================================================================
 """
 from __future__ import annotations

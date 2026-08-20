@@ -4,10 +4,8 @@
 【这个文件在整条流水线里做什么？】
 
 它是"总指挥"：把其它文件里的组件（门控 gate、ASR infer、决策 moss_candidate）
-按固定顺序编排成一条完整的端到端流水线，处理完 1838 条竞赛样本，产出
-CER=0.3175 / PR=0.8790 / RR=0.8397 的冻结结果。
+按固定顺序编排成一条完整的端到端流水线：
 
-路线（与 docs/CURRENT_BEST_PIPELINE_SZY_V1.md 一致）：
   1. 读取 DatasetA 的 pos.jsonl / neg.jsonl + WAV  → Sample 列表
   2. ERes2NetV2 + CAM++ 双前端 MLP 主门控          → 拒识（输出空）或放行
   3. 放行样本：raw 命令音频 → FireRed 转写 + 置信度
@@ -16,7 +14,9 @@ CER=0.3175 / PR=0.8790 / RR=0.8397 的冻结结果。
   6. 唤醒文本选锚点（编辑距离）+ 差分声纹选命令源
   7. 任何异常 → 回退 raw FireRed → raw 也失败才输出空文本
 
+  
 设计要点（工程上值得学的）：
+
   - 分离候选【只可改善、不可夺权】：raw 文本永远保留为兜底
   - 每处理一条就写 checkpoint，支持 --resume 断点续跑
   - manifest 记录模型 SHA256，保证"哪次结果用了哪份模型"可追溯
