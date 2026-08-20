@@ -1,0 +1,42 @@
+# ============================================================
+# SZY v1 依赖清单（在原有基础上补充了缺失的 onnxruntime/soundfile）
+# 安装建议：用 conda 建独立环境（见 docs/SETUP_本地复现指南.md 第 2 节）
+# ============================================================
+
+# 指定 PyTorch 走 CUDA 12.8 的官方 wheel 源；你的 CUDA 版本不同时请改这里
+# （CPU-only 环境请删掉这行，并装 CPU 版 torch）
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch>=2.2          # PyTorch 主框架（声纹模型、MLP 门控、LoRA 后端都用它）
+torchaudio>=2.2     # 音频处理（重采样等）
+qwen-asr>=0.0.6     # Qwen3-ASR 官方推理包（仅旧基线 qwen 后端需要）
+modelscope>=1.17.0  # ModelScope 模型加载（ERes2NetV2/CAM++ 声纹前端）
+numpy>=1.26         # 数值计算
+tqdm>=4.66          # 进度条
+
+# ---- 以下为补充（原 requirements.txt 缺失，但代码 import 了它们）----
+onnxruntime>=1.16   # MossFormer2 分离器的 ONNX 推理引擎；GPU 版请另装 onnxruntime-gpu
+soundfile>=0.12     # 音频读写（Moss 分离结果写 wav、读时长）
+
+# ---- modelscope 的传递依赖（某些安装方式会漏装，导致 import 时 ModuleNotFoundError）----
+addict              # modelscope 配置字典（from modelscope.utils.config import ConfigDict 需要）
+simplejson          # modelscope 内部 JSON 处理
+sortedcontainers    # modelscope 内部有序容器
+yapf                # modelscope 代码格式化工具（部分 pipeline 加载时会 import）
+einops              # 张量重排库（声纹/音频模型常用）
+datasets            # HuggingFace datasets（modelscope.msdatasets 需要）
+pandas              # 表格数据（modelscope 内部多处 import）
+scipy               # 科学计算（声纹/音频模型常用）
+scikit-learn        # 机器学习工具（modelscope 部分 pipeline 需要）
+pyarrow             # datasets 的后端（列式存储）
+# ---- FireRedASR2S 推理依赖（原团队的这些包装在 conda 环境里，不在 vendor 目录）----
+kaldiio             # kaldi scp/ark 读取（FireRed 的 asr_feat.py 需要）
+sentencepiece       # 子词分词（FireRed 词表/tokenizer 可能需要）
+pyyaml              # yaml 配置解析（FireRed 读取配置可能需要）
+# 注意：kaldi_native_fbank 已装在 model/runtime/vendor（队长工作区复制），不在此处重复装。
+# 若报 No module named '_kaldi_native_fbank'，是 vendor 里的 .so 与你的 Python 版本不匹配，
+# 用与你 Python 版本一致的 wheel 重装到 vendor：
+#   pip install --target model/runtime/vendor kaldi_native_fbank==1.22.3
+
+# ---- 若仍报缺模块（如 oss2 / gast / Pillow / attrs / huggingface-hub / multiprocess），
+# 直接 pip install 同名包即可。

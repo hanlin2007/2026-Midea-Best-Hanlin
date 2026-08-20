@@ -1,0 +1,26 @@
+# ---- 模型与数据 ----
+model/
+dataset/
+datasetA/dataset.zip
+
+# ---- 运行产物 ----
+outputs/
+outputs/szy_v1_*.json
+outputs/szy_v1_cache/
+outputs/smoke_*.json
+outputs/submission.json
+outputs/detail.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ---- IDE / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
