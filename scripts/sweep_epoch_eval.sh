@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# szy_v4 epoch 扫描：训练（mossft_sweep，out_mossft_sweep/ep{N}.pt）过程中，
+# SZY epoch 扫描：训练（mossft_sweep，out_mossft_sweep/ep{N}.pt）过程中，
 # 每出现一个偶数 epoch 快照就在空闲 GPU 上跑一次 DatasetA 全量评估。
 # 三张评估 GPU 各负责一组 epoch，组内串行：
 #   GPU0: ep2  ep8  ep14 ep20
 #   GPU1: ep4  ep10 ep16
 #   GPU3: ep6  ep12 ep18
-# 结果：outputs/sweep_v4/ep{N}_detail.json + ep{N}.log；分离缓存各自独立。
+# 结果：outputs/sweep/ep{N}_detail.json + ep{N}.log；分离缓存各自独立。
 set -u
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,7 +13,7 @@ workspace="$(cd "${repo}/.." && pwd)"
 model_root="${workspace}/model"
 python_bin="${PYTHON_BIN:-/home/hustdun/.conda/envs/yuyin/bin/python}"
 ckpt_dir="${workspace}/dataset_dasynth/out_mossft_sweep"
-out="${repo}/outputs/sweep_v4"
+out="${repo}/outputs/sweep"
 data_root="${workspace}/dataset/dataset_test/datasetA/datasetA"
 mkdir -p "${out}"
 
@@ -30,9 +30,9 @@ run_one() {  # $1=epoch $2=gpu
   local cfg="${out}/ep${ep}.json"
   "${python_bin}" - <<EOF
 import json
-c = json.load(open("${repo}/configs/szy_v4_firered.json"))
+c = json.load(open("${repo}/configs/pipeline_firered.json"))
 c["moss_model"] = "${ckpt_dir}/ep${ep}.pt"
-c["separation_cache"] = "outputs/szy_v4_cache_sweep/ep${ep}/separation"
+c["separation_cache"] = "outputs/szy_cache_sweep/ep${ep}/separation"
 json.dump(c, open("${cfg}", "w"), ensure_ascii=False, indent=2)
 EOF
   cd "${repo}"
@@ -40,7 +40,7 @@ EOF
   PYTHONPATH="${repo}/src:${model_root}/runtime/vendor" \
   MODELSCOPE_CACHE="${model_root}/workspace/midea/models/modelscope" \
   HF_HUB_OFFLINE=1 \
-  "${python_bin}" -u -m szy_v4.pipeline \
+  "${python_bin}" -u -m szy.cli \
     --data-root "${data_root}" \
     --jsonl "${data_root}/pos.jsonl" "${data_root}/neg.jsonl" \
     --config "${cfg}" \

@@ -8,7 +8,7 @@ workspace="$(cd "${repo}/.." && pwd)"
 model_root="${workspace}/model"
 python_bin="${PYTHON_BIN:-/home/hustdun/.conda/envs/yuyin/bin/python}"
 ckpt_dir="${workspace}/dataset_dasynth/out_mossft_sweep"
-out="${repo}/outputs/sweep_v4"
+out="${repo}/outputs/sweep"
 data_root="${workspace}/dataset/dataset_test/datasetA/datasetA"
 
 # 1) 等消融结束
@@ -28,9 +28,9 @@ run_one() {
   local cfg="${out}/ep${ep}.json"
   "${python_bin}" - <<EOF
 import json
-c = json.load(open("${repo}/configs/szy_v4_firered.json"))
+c = json.load(open("${repo}/configs/pipeline_firered.json"))
 c["moss_model"] = "${ckpt_dir}/ep${ep}.pt"
-c["separation_cache"] = "outputs/szy_v4_cache_sweep/ep${ep}/separation"
+c["separation_cache"] = "outputs/szy_cache_sweep/ep${ep}/separation"
 json.dump(c, open("${cfg}", "w"), ensure_ascii=False, indent=2)
 EOF
   cd "${repo}"
@@ -39,7 +39,7 @@ EOF
   PYTHONPATH="${repo}/src:${model_root}/runtime/vendor" \
   MODELSCOPE_CACHE="${model_root}/workspace/midea/models/modelscope" \
   HF_HUB_OFFLINE=1 \
-  "${python_bin}" -u -m szy_v4.pipeline \
+  "${python_bin}" -u -m szy.cli \
     --data-root "${data_root}" \
     --jsonl "${data_root}/pos.jsonl" "${data_root}/neg.jsonl" \
     --config "${cfg}" \

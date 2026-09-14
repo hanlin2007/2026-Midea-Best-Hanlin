@@ -1,7 +1,21 @@
+# SZY 系统依赖清单（conda env: yuyin）
+# 说明：torch 请装 CUDA 版（--extra-index-url 指向 cu128 轮子源），
+# 纯 CPU 版无法跑分离器/声纹前端的 GPU 推理。
+
 --extra-index-url https://download.pytorch.org/whl/cu128
-torch>=2.2
-torchaudio>=2.2
-qwen-asr>=0.0.6
-modelscope>=1.17.0
-numpy>=1.26
-tqdm>=4.66
+
+# ---- 核心（推理必需） ----
+torch>=2.2                      # 分离器 / 声纹前端 / 训练（CUDA 版）
+torchaudio>=2.2                 # torch 音频生态（部分模型代码间接依赖）
+modelscope>=1.17.0              # ModelScope 模型仓库（ERes2NetV2 声纹基座）
+numpy>=1.26                     # 波形数组 / 门控特征运算
+soundfile>=0.12                 # WAV 读取与写出（分离缓存落盘）
+tqdm>=4.66                      # 进度条
+qwen-asr>=0.0.6                 # baseline 路线（midea_qiji.infer）的 Qwen3-ASR 后端
+
+# ---- FireRed ASR 运行时依赖 ----
+# kaldi_native_fbank：仓库内已 vendor（model/runtime/vendor，py3.10 编译版），
+# 无需 pip 安装；PYTHONPATH 需包含 model/runtime/vendor（run.sh 已处理）。
+
+# ---- 训练可选 ----
+# wandb：szy.train 微调训练的实验记录（不需要训练可不装）
