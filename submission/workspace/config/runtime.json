@@ -1,0 +1,4 @@
+{
+  "pipeline_config": "config/inference.json",
+  "seed": 2026
+}

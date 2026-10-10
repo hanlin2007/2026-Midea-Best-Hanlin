@@ -27,3 +27,11 @@ Thumbs.db
 
 # 训练日志（wandb 本地目录）
 wandb/
+
+# 交付工作区：代码与说明入库，模型权重与运行产物只保存在服务器
+submission/workspace/model/*
+!submission/workspace/model/README.md
+submission/workspace/cache/*
+!submission/workspace/cache/.gitkeep
+submission/workspace/outputs/*
+!submission/workspace/outputs/.gitkeep

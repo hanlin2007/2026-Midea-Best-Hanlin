@@ -1,0 +1,20 @@
+from _kaldi_native_fbank import (
+    FbankOptions,
+    FeatureWindowFunction,
+    FrameExtractionOptions,
+    IStft,
+    MelBanks,
+    MelBanksOptions,
+    MfccOptions,
+    OnlineFbank,
+    OnlineMfcc,
+    OnlineRawAudioSamples,
+    OnlineWhisperFbank,
+    RawAudioSamplesOptions,
+    Rfft,
+    Stft,
+    StftConfig,
+    StftResult,
+    WhisperFeatureOptions,
+)
+__version__ = '1.22.3'
