@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "midea-qiji-szy"
-version = "4.0.0"
-description = "Midea target-speaker voice-command recognition (SZY system)"
+version = "4.5.0"
+description = "Midea target-speaker voice-command recognition (SZY/LSZ system)"
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
