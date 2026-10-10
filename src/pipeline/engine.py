@@ -62,7 +62,8 @@ import numpy as np                              # 向量化数值计算（点积
 
 # ---- core 内核（下层依赖，声纹/识别/数据模型/决策规则） ----
 from core.nbest import conservative_mbr_rerank
-from core.embeddings import ModelScopeEmbedder, read_wav
+from core.audio import read_wav
+from core.embeddings import ModelScopeEmbedder
 from core.samples import (
     Sample,
     submission_id,

@@ -1,8 +1,7 @@
-"""core.text：文本归一化、编辑距离与 CER 指标。
+"""core.text：文本归一化与编辑距离（全仓库文本口径的唯一实现）。
 
 全仓库的文本口径统一由本模块负责：数字/百分号转中文、去标点空白、小写
-（``normalize_transcript``），字符级编辑距离（``levenshtein``），CER
-（``cer``），以及从各类 ASR 输出结构中抽取文本（``extract_asr_text``）。
+（``normalize_transcript``），字符级编辑距离（``levenshtein``）。
 
 为什么"比对文本前必须先归一化"：ASR 输出的文本在格式上极不稳定——同一
 句话可能被转写成阿拉伯数字（"25度"）或汉字（"二十五度"），可能带大小写、
@@ -12,60 +11,15 @@ CER 就不再反映真实识别错误。归一化把所有文本统一到同一�
 无标点、小写），编辑距离于是只度量"内容差异"。
 
 本模块同时是冻结语义重灾区：normalize_transcript 与官方评测口径一致，
-levenshtein 是 moss_candidate 决策规则的基础。这俩函数任何一行改动都会
-改变下游数字（CER/PR/RR 以及唤醒锚点选择），改动前先跑
-``tests/test_infer.py`` 与 ``tests/test_moss_candidate.py``。
+levenshtein 是 wake_anchor 决策规则与 CER 统计的基础。这俩函数任何一行
+改动都会改变下游数字（CER/PR/RR 以及唤醒锚点选择），改动前先跑
+``tests/test_text.py`` 与 ``tests/test_wake_anchor.py``。
 
-依赖：仅标准库（re / typing）。原实现在 infer.py，拆分后 infer.py 通过
-re-export 保持 ``from core.samples import normalize_transcript`` 等
-旧导入路径可用。
+依赖：仅标准库（re）。
 """
 from __future__ import annotations  # 延迟求值注解：str | None 等新式注解存成字符串，不产生运行时开销
 
 import re  # 正则：归一化管线的四步替换全靠它
-from typing import Any  # Any = "来者不拒"：extract_asr_text 的入参来自不同后端，结构未知
-
-
-def extract_asr_text(result: Any) -> str:
-    """从 Qwen3-ASR 等后端返回结构中递归抽取文本字段。
-
-    不同 ASR 后端返回结构五花八门：有的返回带 ``.text`` 属性的对象
-    （Qwen3-ASR 的结果类型），有的直接返回字符串，有的把文本包在
-    dict / list 里甚至多层嵌套。与其让每个调用方各写一套 if-else
-    探测（必然口径漂移、有的写错），不如集中在这里做一次防御式递归
-    解析。
-
-    两个设计要点：
-      - 递归：list 的每个元素、dict 的每个 value 都可能再藏一层结构，
-        所以探测本身要能自我调用；
-      - 探测失败显式抛 ValueError，而不是静默返回空串——空串会污染
-        下游 CER（看起来像"识别出空"，实际是"没解析出来"），显式失败
-        让问题在最早的位置暴露。
-    """
-    text = getattr(result, "text", None)  # 优先取对象属性（Qwen3-ASR 的 result 对象带 .text）
-    if text is not None:
-        return str(text)
-    if isinstance(result, str):  # 本身就是裸字符串，直接收下
-        return result
-    if isinstance(result, dict):
-        for key in ("text", "sentence", "raw_text"):  # 常见 dict 键名，按出现概率排序
-            if key in result:
-                return str(result[key])
-        for value in result.values():  # 没有认识的键 -> 逐个值递归探测
-            try:
-                return extract_asr_text(value)
-            except ValueError:  # 该子树里没有文本，换下一个值继续
-                continue
-    if isinstance(result, list):
-        parts = []
-        for value in result:
-            try:
-                parts.append(extract_asr_text(value))
-            except ValueError:  # 列表里夹着纯元数据元素时跳过
-                continue
-        if parts:
-            return "".join(parts)  # 多段文本按原顺序拼接成一段
-    raise ValueError(f"cannot extract ASR text from {result!r}")
 
 
 def normalize_transcript(text: str) -> str:
@@ -159,19 +113,3 @@ def levenshtein(left: str, right: str) -> int:
             current.append(min(current[-1] + 1, previous[right_index] + 1, previous[right_index - 1] + (left_character != right_character)))
         previous = current  # 滚动：处理下一行时，本行就是"上一行"
     return previous[-1]  # 表右下角 = 完整两个字符串的编辑距离
-
-
-def cer(hypothesis: str, label: str | None) -> float | None:
-    """字符错误率；label 为空串时按 hypothesis 是否非空计 0/1，None 返回 None。
-
-    CER = 编辑距离 / 标注长度。除以标注长度而不是假设长度，让"长句错
-    几个字"占比更低——以标注为基准才公平（否则说长了反而占便宜）。
-    两个边界约定：
-      - label 是空串：分母为 0 无意义，约定按"识别结果是否也为空"记
-        0 或 1（对上了算全对，多说了算全错）；
-      - label 是 None：该样本没有标注（负样本 / 被拒绝样本），返回
-        None 表示"不参与统计"，由上层汇总时跳过。
-    """
-    if label is None:
-        return None
-    return levenshtein(hypothesis, label) / len(label) if label else float(hypothesis != "")

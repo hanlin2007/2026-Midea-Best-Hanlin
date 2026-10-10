@@ -1,40 +1,37 @@
-"""core.recognizers：全部 ASR 识别后端（统一 transcribe 接口）。
+"""core.firered：FireRedASR2 识别后端（AED 生产 / LLM 可选）。
 
-四个后端按"转写口径 + 置信度语义"分工：
+两个后端按"转写口径 + 置信度语义"分工：
 
-  - ``QwenRecognizer``           Qwen3-ASR-0.6B（baseline 默认后端，无置信度）；
-  - ``FireRedRecognizer``        FireRedASR2-AED（SZY 系列主后端，带置信度）；
+  - ``FireRedRecognizer``        FireRedASR2-AED（生产主后端，带置信度，
+                                 支持 beam/N-best/ELM 与共享实例临时切换）；
   - ``FireRedLLMRecognizer``     FireRedASR2-LLM（Qwen2-7B 解码，序列平均对数
-                                 概率充当置信度，供音色触发器使用）；
-  - ``ConditionedQwenRecognizer`` Qwen3-ASR + sv_asr 双音频条件 LoRA
-                                 （[kws, cmd] → 目标说话人文本，实验后端）。
+                                 概率充当置信度；上限更高但更慢，备选）。
 
 公共约定：``transcribe_many(paths) -> list[str]`` 返回归一化文本；管线内部
-需要置信度时统一走 pipeline.helpers.transcribe_firered_rows（访问
-``_model.transcribe`` 的原始行）。重型依赖（torch / peft / FireRed 包 /
-modelscope）一律延迟导入，保证本模块可被轻量环境 import。
+需要置信度与 N-best 时统一走 ``_model.transcribe`` 的原始行（见
+pipeline.engine.PipelineRunner._transcribe_with_asr）。重型依赖
+（torch / fireredasr2 包）一律延迟导入，保证本模块可被轻量环境 import。
 
 设计说明（面向初学者）：
-- 四个后端没有共同的抽象基类，而是靠"鸭子类型"统一接口：只要对象提供
-  transcribe_many(paths) 方法，infer.main 就能无差别调度它。这是 Python
-  社区常见的"协议式多态"——不强制继承，只约定行为。FireRedLLMRecognizer
-  更是把自己的 transcribe() 暴露成 ``_model.transcribe``，让上层能用与
-  FireRedRecognizer 完全相同的代码访问（见该类的 self._model = self）。
-- ``pipeline.helpers.transcribe_firered_rows`` 属于上层 szy 系统的入口：上层
-  来调用本内核层的能力，内核层自身绝不 import 任何 szy/ 模块——依赖
-  方向只能自下而上，这是分层架构的纪律。
+- 两个后端没有共同的抽象基类，而是靠"鸭子类型"统一接口：只要对象提供
+  transcribe_many(paths) 与 _model.transcribe，引擎就能无差别调度。这是
+  Python 社区常见的"协议式多态"——不强制继承，只约定行为。
+  FireRedLLMRecognizer 更是把自己的 transcribe() 暴露成
+  ``_model.transcribe``，让上层能用与 FireRedRecognizer 完全相同的代码
+  访问（见该类的 self._model = self）。
+- 本模块在内核层，绝不 import 上层 pipeline/ 模块——依赖方向只能自下
+  而上，这是分层架构的纪律。
 
-功能：把音频路径列表转成归一化中文文本列表（各后端另按需提供置信度）。
+功能：把音频路径列表转成归一化中文文本列表（另按需提供置信度与 N-best）。
 
-关键导出：QwenRecognizer / FireRedRecognizer / FireRedLLMRecognizer /
-ConditionedQwenRecognizer。
+关键导出：FireRedRecognizer / FireRedLLMRecognizer。
 
-依赖：core.text / .audio / .paths / .infer（suppress_model_output）。
-重型依赖（torch / peft / qwen_asr / fireredasr2）全部在构造函数内延迟导入。
+依赖：core.text / core.model_paths / core.samples（suppress_model_output）。
+重型依赖（torch / fireredasr2）全部在构造函数内延迟导入。
 
-用法（通常由 infer.main 按 config.asr_backend 装配，不必手写）：
-    recognizer = QwenRecognizer(model, device, model_root, batch_size)
-    texts = recognizer.transcribe_many([Path("a.wav"), Path("b.wav")])
+用法（通常由 pipeline.engine 按配置装配，不必手写）：
+    asr = FireRedRecognizer(model_dir, "cuda:0", repo_root, beam_size=3, nbest=3)
+    texts = asr.transcribe_many([Path("a.wav"), Path("b.wav")])
 """
 from __future__ import annotations
 
@@ -42,53 +39,9 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
-# 注意：这里顶部 import 了 .infer，但不会循环导入——infer 对 recognizers
-# 的 import 全部放在 main() 函数内部（延迟导入），所以两个模块互相引用
-# 时，import 顺序不会形成环。
-from .audio import load_audio_mono_16k
+from .model_paths import DEFAULT_FIRED_VENDOR
 from .samples import suppress_model_output
-from .model_paths import DEFAULT_FIRED_VENDOR, resolve_model_path
-from .text import extract_asr_text, normalize_transcript
-
-
-class QwenRecognizer:
-    """Qwen3-ASR-0.6B 后端（baseline 默认；transcribe 不输出置信度）。"""
-
-    def __init__(
-        self,
-        model: str,
-        device: str,
-        model_root: str | Path | None,
-        batch_size: int,
-    ) -> None:
-        # 延迟导入（模式说明见 gate.ModelScopeEmbedder 的注释）：torch 与
-        # qwen_asr（本地封装包，运行环境已可导入）只在真正构造后端时才加载。
-        import torch
-        from qwen_asr import Qwen3ASRModel
-
-        self.model = Qwen3ASRModel.from_pretrained(
-            # 先按本地缓存解析模型路径，保证离线可复现。
-            str(resolve_model_path(model, model_root)),
-            dtype=torch.bfloat16,   # bf16 半精度：显存减半、速度更快，ASR 精度损失可忽略
-            # Qwen3ASR 的 device_map 接口要具体设备名；用户填 "cuda" 时映射到 0 号卡。
-            device_map="cuda:0" if device == "cuda" else device,
-            # max_inference_batch_size 告诉模型单次最多吃多少条音频（内部据此
-            # 预分配缓存）；至少为 1，防止 0 引发内部错误。
-            max_inference_batch_size=max(1, batch_size),
-            max_new_tokens=256,     # 解码长度上限（中文指令文本通常远小于 256 token）
-        )
-
-    def transcribe_many(self, audio_paths: list[Path]) -> list[str]:
-        # suppress_model_output：模型加载/推理会向 stdout/stderr 打印大量
-        # 日志，静默掉以免淹没我们自己的进度条与结果输出。
-        with suppress_model_output():
-            results = self.model.transcribe(
-                audio=[str(path) for path in audio_paths],
-                # Qwen3-ASR 支持语种提示；这里整批都是中文指令。
-                language=["Chinese"] * len(audio_paths),
-            )
-        # 每个结果先抽出文本字段，再做统一归一化（全角/半角、标点等规则）。
-        return [normalize_transcript(extract_asr_text(result)) for result in results]
+from .text import normalize_transcript
 
 
 class FireRedRecognizer:
@@ -482,159 +435,3 @@ class FireRedLLMRecognizer:
         if len(mapped) != len(audio_paths):
             raise RuntimeError("FireRedLLM returned an unexpected result count")
         return [normalize_transcript(str(mapped[uid].get("text", ""))) for uid in utterance_ids]
-
-
-class ConditionedQwenRecognizer:
-    """sv_asr 双音频条件 LoRA 后端：输入 [kws(目标人参考), cmd] → 目标人文本。
-
-    思路：给 Qwen3-ASR 同时喂两段音频——第一段是目标说话人的参考语音
-    （kws/wake），第二段是待转写指令——让模型"学着"只输出第二段中目标
-    说话人的内容，其余说话人一律忽略。转写由模型完成，拒识仍由门控负责。
-
-    基座 Qwen3-ASR-0.6B + LoRA adapter（text decoder LoRA + audio projector
-    全量，sv_asr/train_asr.py 训练，只学转写不学拒识，拒识仍由门控负责）。
-    prompt / 解码 / max_new_tokens 与 train_asr.py 的 dev 评估完全一致。
-    依赖：peft（vendor 目录）+ midea/src3 的 qwen_loader（只读复用）。
-    """
-
-    # 类属性标记：本后端是"条件后端"（需要 (wake, cmd) 成对输入）。
-    # infer.main 用 getattr(recognizer, "conditioned", False) 探测它，
-    # 决定走 transcribe_pairs 还是 transcribe_many——鸭子类型的轻量约定。
-    conditioned = True
-
-    def __init__(
-        self,
-        model: str,
-        adapter: str | Path,
-        device: str,
-        model_root: str | Path | None,
-        vendor_root: str | Path = "/home/hustdun/szy_workspace/vendor",
-        src3_root: str | Path = "/home/hustdun/szy_workspace/midea/src3",
-    ) -> None:
-        import sys
-
-        import torch
-
-        # vendor 目录装 peft 等私有依赖；src3 是另一份代码库，本内核只
-        # 只读复用其中的 qwen_loader（不改它、不拷它，避免两处维护）。
-        for path in (str(vendor_root), str(src3_root)):
-            if path not in sys.path:
-                sys.path.insert(0, path)
-        from peft import PeftModel
-        from qwen_loader import load_base_model, load_processor
-
-        model_path = resolve_model_path(model, model_root)
-        self.processor = load_processor(model_path)   # 基座模型配套的音频/文本处理器
-        # device 参数统一转成具体设备名（"cuda" -> "cuda:0"）。
-        self.device = "cuda:0" if device == "cuda" else device
-        # GPU 用 bf16（省显存、速度快）；CPU 上 bf16 算子支持不全，回退 fp32。
-        self.dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
-        self._torch = torch
-        # device_map 以 dict 形式出现时表示"整个模型都放这个设备"；
-        # 与 "auto"（自动切分多卡）相对。
-        self.model = load_base_model(
-            model_path, dtype=self.dtype, device_map={"": self.device}
-        )
-        # 把 LoRA adapter 挂到基座的 thinker（文本解码器）上：PeftModel
-        # 只装载 adapter 增量权重，基座权重原地复用——所以 adapter 目录
-        # 很小（几十 MB 级），可以为一个基座保存多个 adapter 快速切换。
-        self.model.thinker = PeftModel.from_pretrained(
-            self.model.thinker, str(Path(adapter).resolve())
-        )
-        self.model.eval()
-        # 开启 KV cache：自回归解码时复用已算过的 key/value，大幅加速。
-        self.model.thinker.config.use_cache = True
-        self.max_new_tokens = 128
-
-    def _build_prompt(self) -> str:
-        """与 sv_asr/train_asr.py build_prompt 逐字一致。
-
-        逐字一致是关键：LoRA 是在这套 prompt 格式下训练的，推理时 prompt
-        变了，模型看到的输入分布就变了，效果会掉。两个 audio 占位符对应
-        后面 processor(audio=[enroll, command]) 传入的两段音频。
-        """
-        messages = [
-            # 系统提示词：规定任务语义（第一段=目标人参考，第二段=只转写目标人）。
-            {
-                "role": "system",
-                "content": (
-                    "你是目标说话人语音识别器。第一段音频是目标说话人的参考语音。"
-                    "第二段音频中可能有多个人同时说话和背景噪声，"
-                    "请只转写第二段音频中目标说话人"
-                    "（与第一段参考语音是同一人）所说的内容，"
-                    "忽略其他说话人。不要输出解释。"
-                ),
-            },
-            # 用户消息：两个音频占位符（内容为空串，真正的音频由 processor
-            # 在 audio= 参数里注入；Qwen3-ASR 的 chat template 会按此结构
-            # 生成对应的 <audio> 标记）。
-            {
-                "role": "user",
-                "content": [
-                    {"type": "audio", "audio": ""},
-                    {"type": "audio", "audio": ""},
-                ],
-            },
-        ]
-        # apply_chat_template：把 messages 渲染成模型训练时用的字符串格式，
-        # 并追加"生成提示"（告诉模型接下来该它说话了）。
-        prompt = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=False
-        )
-        # 尾部后缀是 Qwen3-ASR 的输出格式约定：先输出语种标签，再输出
-        # <asr_text> 包裹的转写文本（与训练时 dev 评估完全一致）。
-        return prompt + "language Chinese<asr_text>"
-
-    def transcribe_pairs(self, pairs: list[tuple[Path, Path]]) -> list[str]:
-        """条件转写：pairs = [(wake, cmd), ...]，逐对输出目标人文本。
-
-        逐对（而非批量）推理：两段音频要拼进同一个输入序列，长度组合
-        各异，批量打包收益低且实现复杂，逐条处理更清晰可控。
-        """
-        torch = self._torch
-        outputs: list[str] = []
-        for wake_path, command_path in pairs:
-            # 统一转成单声道 16kHz 波形（模型前置约定），两段分别是
-            # 参考音频与待转写指令音频。
-            enroll_audio = load_audio_mono_16k(wake_path)
-            command_audio = load_audio_mono_16k(command_path)
-            # processor 一次完成：prompt 分词 + 音频特征提取 + 组装输入。
-            # return_tensors="pt" 让输出都是 torch 张量；padding=True 对齐
-            # 序列长度。返回的是 BatchFeature（dict 的加强版），dict() 转普通 dict。
-            inputs = dict(
-                self.processor(
-                    text=[self._build_prompt()],
-                    audio=[enroll_audio, command_audio],
-                    return_tensors="pt",
-                    padding=True,
-                )
-            )
-            # 逐字段搬设备/精度：浮点张量（音频特征等）要带 dtype 转 bf16；
-            # 整型张量（input_ids/attention_mask）只搬设备不能转 dtype；
-            # 非张量（list/str 等）原样保留。三层条件表达式用
-            # hasattr(value, "to") 判断是否为张量。
-            inputs = {
-                key: (
-                    value.to(device=self.device, dtype=self.dtype)
-                    if hasattr(value, "is_floating_point") and value.is_floating_point()
-                    else value.to(device=self.device)
-                    if hasattr(value, "to")
-                    else value
-                )
-                for key, value in inputs.items()
-            }
-            with torch.inference_mode():   # 推理上下文（比 no_grad 更快）
-                generated = self.model.generate(
-                    **inputs, max_new_tokens=self.max_new_tokens
-                )
-            # 输出序列 = 输入 prompt + 新生成 token；切掉 prompt 部分
-            # （inputs["input_ids"].shape[1] 即 prompt 长度），只留生成文本。
-            sequence = generated.sequences[0, inputs["input_ids"].shape[1] :]
-            text = self.processor.decode(
-                sequence,
-                skip_special_tokens=True,
-                # 保留原始分词空格（与训练时 dev 评估的解码口径一致）。
-                clean_up_tokenization_spaces=False,
-            ).strip()
-            outputs.append(normalize_transcript(text))
-        return outputs

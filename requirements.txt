@@ -1,4 +1,4 @@
-# SZY 系统依赖清单（conda env: yuyin）
+# 依赖清单
 # 说明：torch 请装 CUDA 版（--extra-index-url 指向 cu128 轮子源），
 # 纯 CPU 版无法跑分离器/声纹前端的 GPU 推理。
 
@@ -11,12 +11,11 @@ modelscope>=1.17.0              # ModelScope 模型仓库（ERes2NetV2 声纹基
 numpy>=1.26                     # 波形数组 / 门控特征运算
 soundfile>=0.12                 # WAV 读取与写出（分离缓存落盘）
 tqdm>=4.66                      # 进度条
-pypinyin>=0.50                  # 拼音音素相似度（唤醒锚点选择，midea_qiji.phoneme）
-qwen-asr>=0.0.6                 # baseline 路线（midea_qiji.infer）的 Qwen3-ASR 后端
+pypinyin>=0.50                  # 拼音音素相似度（唤醒锚点选择，core.phoneme）
 
 # ---- FireRed ASR 运行时依赖 ----
 # kaldi_native_fbank：仓库内已 vendor（model/runtime/vendor，py3.10 编译版），
-# 无需 pip 安装；PYTHONPATH 需包含 model/runtime/vendor（run.sh 已处理）。
+# 无需 pip 安装；PYTHONPATH 需包含 model/runtime/vendor（scripts/run.sh 已处理）。
 
 # ---- 训练可选 ----
-# wandb：szy.train 微调训练的实验记录（不需要训练可不装）
+# wandb：pipeline.train 微调训练的实验记录（不需要训练可不装）

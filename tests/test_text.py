@@ -1,14 +1,14 @@
-"""core 基线数据/文本/报告口径的单元测试（numpy-only，无需模型）。
+"""文本口径与数据入口的单元测试（numpy-only，无需模型）。
 
-这组测试锁死的是"口径"——文本归一化规则、id 生成规则、manifest 中文
-字段、报告与竞赛提交物的 schema。这些规则一旦被"顺手改进"，官方评测
-脚本可能直接判 0 分，或者 CER 统计口径悄悄漂移。所以它们存在的意义
-不是"证明代码能跑"，而是"证明历史行为没有被改挂"——测试即文档：
-读这些测试就能知道每个函数的约定是什么。
+这组测试锁死的是"口径"——文本归一化规则、id 生成规则、JSONL 中文
+字段读取、提交物 schema。这些规则一旦被"顺手改进"，官方评测脚本可能
+直接判 0 分，或者 CER 统计口径悄悄漂移。所以它们存在的意义不是
+"证明代码能跑"，而是"证明历史行为没有被改挂"——测试即文档：读这些
+测试就能知道每个函数的约定是什么。
 
 为什么这些测试不需要模型/GPU：被测函数（normalize_transcript、
-submission_id、read_many_jsonl、write_reports、summarize、write_outputs）
-全是纯数据/文本处理，测试里用手工构造的小数据覆盖全部边界。
+submission_id、read_many_jsonl、summarize、write_outputs）全是纯
+数据/文本处理，测试里用手工构造的小数据覆盖全部边界。
 
 unittest 基础（初学可对照正文）：
   - 继承 unittest.TestCase 的类就是一组测试；类里以 test_ 开头的方法
@@ -18,7 +18,7 @@ unittest 基础（初学可对照正文）：
   - 每个测试方法独立运行、互不影响，一个挂了不影响其他。
 
 运行（仓库根目录）：
-  PYTHONPATH=src python -m unittest tests.test_infer -v
+  PYTHONPATH=src python -m unittest tests.test_text -v
 （PYTHONPATH=src 让 unittest 进程能 import 到 src/ 下的包——
 测试文件自身在 tests/ 里，不在包内，和脚本一样需要路径配置。）
 """
@@ -29,11 +29,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from core.samples import Sample, normalize_transcript, read_many_jsonl, submission_id, write_reports
+from core.samples import Sample, read_many_jsonl, submission_id
+from core.text import normalize_transcript
 from pipeline.reporting import summarize, write_outputs
 
 
-class InferTest(unittest.TestCase):
+class TextAndSamplesTest(unittest.TestCase):
     def test_normalization_matches_baseline_rules(self) -> None:
         # 归一化规则的两类核心转换各举一例锁死：
         # 数字转中文（25 -> 二十五、30 -> 三十、101 -> 一百零一）、
@@ -74,33 +75,8 @@ class InferTest(unittest.TestCase):
         # 所以要用测试提前锁死。
         self.assertEqual(samples[0].wake_text, "你好科慕")
 
-    def test_report_metrics_and_schema(self) -> None:
-        # 用两条手工数据（一正一负）测 write_reports 的完整行为：
-        # 指标计算 + detail.json 的 schema。
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            summary = write_reports(
-                [
-                    {"id": "pos/a", "content": "开灯", "label": "开灯", "sv_score": "0.5"},
-                    {"id": "neg/a", "content": "", "label": None, "sv_score": "0.1"},
-                ],
-                2.0,
-                root / "submission.json",
-                root / "detail.json",
-            )
-            payload = json.loads((root / "detail.json").read_text(encoding="utf-8"))
-        # 正样本转写完全正确 -> CER=0；正样本有非空输出 -> PR=1；
-        # 负样本空输出 -> 正确拒绝 -> RR=1。
-        self.assertEqual(summary["final_cer"], 0.0)
-        self.assertEqual(summary["final_pr"], 1.0)
-        self.assertEqual(summary["final_rr"], 1.0)
-        # detail 结果行必须带 sample_type 字段（下游 replay/消融脚本
-        # 靠它区分正负样本）；负样本行的 rr 应为 1.0。
-        self.assertEqual(payload["results"][0]["sample_type"], "positive")
-        self.assertEqual(payload["results"][1]["rr"], 1.0)
-
-    def test_szy_submission_matches_competition_schema(self) -> None:
-        # SZY 提交物的竞赛 schema 契约测试。
+    def test_submission_matches_competition_schema(self) -> None:
+        # 提交物的竞赛 schema 契约测试。
         # schema = 文件结构约定。官方评分脚本按固定结构解析提交文件，
         # 少一个键/多一个键/类型不对都可能直接判 0 分——本地跑分再高
         # 也没用。所以用测试把结构锁死。
@@ -129,6 +105,6 @@ class InferTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # 直接运行本文件时也能跑测试（python tests/test_infer.py），
+    # 直接运行本文件时也能跑测试（python tests/test_text.py），
     # 与 python -m unittest 等价；被 discover 导入时这行不执行。
     unittest.main()

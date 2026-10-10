@@ -1,4 +1,4 @@
-"""core.paths：仓库内模型路径常量与本地模型解析。
+"""core.model_paths：仓库内模型路径常量与本地模型解析。
 
 ``resolve_model_path`` 是唯一合法的"模型 id → 本地路径"解析入口：优先直接
 路径，其次 --model-root / MODELSCOPE_CACHE，最后 models/modelscope 与
@@ -14,8 +14,7 @@ modelscope hub 缓存，并兼容 ModelScope 的 ``. → ___`` 目录转义。
 PACKAGE_MODEL_ROOT 指向仓库内的 ``model/`` 目录，FireRed 三件套
 （模型 / 源码仓库 / vendor）默认位于其下。
 
-关键导出：``resolve_model_path``、``PACKAGE_MODEL_ROOT``、
-``DEFAULT_FIRED_MODEL / DEFAULT_FIRED_REPO / DEFAULT_FIRED_VENDOR``。
+关键导出：``resolve_model_path``、``PACKAGE_MODEL_ROOT``、``DEFAULT_FIRED_VENDOR``。
 
 依赖：仅标准库（json 不需要；os / pathlib）——零第三方依赖，任何模块
 （包括只想拿个路径的脚本）都能放心 import。
@@ -40,15 +39,8 @@ from pathlib import Path  # 面向对象的路径类型：拼接、存在性判�
 # 安装进 site-packages，__file__ 指向安装目录，推算结果将失去意义——
 # 这也是模型资产必须随仓库分发（而非随包分发）的原因之一。
 PACKAGE_MODEL_ROOT = Path(__file__).resolve().parents[2] / "model"
-# FireRedASR2 是语音识别模型，运行它需要三样东西（"三件套"）：
-#   - 模型权重（DEFAULT_FIRED_MODEL）；
-#   - 配套官方源码仓库（DEFAULT_FIRED_REPO，含模型定义/前处理代码）；
-#   - vendor 依赖目录（DEFAULT_FIRED_VENDOR，kaldi_native_fbank 等原生库，
-#     运行时需加入 sys.path / 环境变量）。
-# 前两者转成 str，因为消费方（infer.py 的 CLI 默认值、模型加载 API）把
-# 它们当字符串路径参数用；vendor 保留 Path 对象，方便继续做路径拼接。
-DEFAULT_FIRED_MODEL = str(PACKAGE_MODEL_ROOT / "external" / "FireRedASR2-AED")
-DEFAULT_FIRED_REPO = str(PACKAGE_MODEL_ROOT / "external" / "FireRedASR2S")
+# FireRedASR2 的 vendor 依赖目录（kaldi_native_fbank 等原生库，运行时需
+# 加入 sys.path）。保留 Path 对象，方便调用方继续做路径拼接。
 DEFAULT_FIRED_VENDOR = PACKAGE_MODEL_ROOT / "runtime" / "vendor"
 
 

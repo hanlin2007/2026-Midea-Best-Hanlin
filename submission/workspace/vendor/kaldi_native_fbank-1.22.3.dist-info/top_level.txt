@@ -1,2 +1,0 @@
-_kaldi_native_fbank
-kaldi_native_fbank
