@@ -2,17 +2,18 @@
 
 职责单一：解析命令行 → 加载配置 → 批量读样本 → 逐样本交给
 :class:`szy.pipeline.SzyRunner` → 断点续跑 checkpoint → 汇总并写出
-提交物（submission / detail / manifest 三件套）。
+提交物（submission / detail / manifest 三件套 + 人类可读报告）。
 
 "职责单一"的体现：本文件只做"编排"（把各组件按顺序串起来），所有
 决策逻辑都在 pipeline.py、所有汇总逻辑在 reporting.py。这样 CLI 本身
 薄到几乎不需要测试，逻辑改动都发生在可独立单测的模块里。
 
-三件套的分工：
+四件产物的分工：
   - submission.json  竞赛格式提交物（交卷用）；
   - detail.json      每样本全字段明细（排查/离线重扫阈值用）；
   - manifest.json    资产指纹（记录这次结果由哪份配置+哪份权重跑出，
-                     复现实验时对着哈希核对即可）。
+                     复现实验时对着哈希核对即可）；
+  - detail_report.txt 人类可读报告（逐样本"病历"，自动生成）。
 
 用法（仓库根目录，推荐直接走 scripts/run.sh 已配好环境变量）：
     PYTHONPATH=src:model/runtime/vendor \
@@ -40,7 +41,7 @@ from tqdm.auto import tqdm                       # 进度条（.auto 自动适�
 from midea_qiji.infer import read_many_jsonl, submission_id
 from szy.helpers import sha256_file              # 资产指纹
 from szy.pipeline import SzyConfig, SzyRunner, load_config
-from szy.reporting import summarize, write_outputs
+from szy.reporting import generate_report, summarize, write_outputs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,9 +59,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-output", default="outputs/checkpoint.json")  # 断点续跑存档
     parser.add_argument("--manifest-output", default="outputs/manifest.json")     # 资产指纹清单
     parser.add_argument("--model-root")                      # 覆盖配置里的模型根目录（可选，不传则用配置文件值）
-    parser.add_argument("--limit", type=int)                 # 只跑前 N 条（调试用）；type=int 表示解析成整数，不合法直接报错
+    parser.add_argument("--limit", type=int)                 # 分层抽样 N 条冒烟（正负比例与全集一致）；type=int 表示解析成整数，不合法直接报错
     parser.add_argument("--resume", action="store_true")     # 从 checkpoint 续跑；store_true = 开关型参数，传了为 True 不传为 False
     return parser
+
+
+def _auto_report(detail_path: Path) -> None:
+    """管线跑完后自动生成人类可读报告（失败不拖垮主流程）。
+
+    报告是"锦上添花"的产物：detail.json 才是数据本体。生成失败（如
+    旧格式 detail 缺字段）只打印警告，不让一次评测白跑——这是"非关键
+    路径容错"与主流程"关键路径严格"的配合。
+    """
+    if not detail_path.is_file():
+        return
+    try:
+        report_path = detail_path.with_name(detail_path.stem + "_report.txt")
+        report_path.write_text(generate_report(detail_path), encoding="utf-8")
+        print(f"[report] {report_path}", flush=True)
+    except Exception as exc:
+        print(f"[report] generation failed: {exc}", flush=True)
 
 
 def main() -> None:
@@ -77,8 +95,21 @@ def main() -> None:
     # 相对路径以 data_root 为基准拼成绝对路径（Sample 对象列表）
     samples = read_many_jsonl(args.jsonl, args.data_root)
     if args.limit is not None:
-        # 切片截断：调试时只跑前 N 条，快速验证链路（不用等全量几小时）
-        samples = samples[: args.limit]
+        # 分层抽样冒烟：按全集正负比例抽 N 条（seed 固定，可复现）。
+        # 只取前 N 条会 skew——pos.jsonl 排在前面时前 N 条几乎全是正
+        # 样本，冒烟既验不出拒识路径也算不出有意义的 RR。
+        import random
+
+        random.seed(42)
+        pos = [s for s in samples if s.label is not None]
+        neg = [s for s in samples if s.label is None]
+        n_pos = round(args.limit * len(pos) / len(samples))
+        n_neg = args.limit - n_pos
+        n_pos = min(n_pos, len(pos))
+        n_neg = min(n_neg, len(neg))
+        samples = random.sample(pos, n_pos) + random.sample(neg, n_neg)
+        random.shuffle(samples)
+        print(f"[limit] {args.limit} samples: {n_pos} pos + {n_neg} neg (ratio {len(pos)}/{len(pos)+len(neg)})")
 
     # ---- 断点续跑：读回 checkpoint，跳过已完成的样本 ----
     # 为什么要 checkpoint：2000 条样本的评测可能跑数小时，任何中断
@@ -106,23 +137,35 @@ def main() -> None:
     # 都在 outputs/ 下）；Path(...).parent 取父目录
     runner = SzyRunner(config, Path(args.output).parent)
     started = time.perf_counter()
+    pending_checkpoint_rows = 0
     # tqdm 包住可迭代对象即显示进度条：desc 是前缀文字，unit="utt" 让
     # 速率显示为 "x utt/s"（utt = utterance，语音界的"条"）
     for sample in tqdm(samples, desc="szy", unit="utt"):
         result = runner.process(sample)
         results.append(result)
-        # 每条样本都落盘一次 checkpoint：长任务随时可中断续跑。
-        # 写盘代价（毫秒级）相对单条推理（秒级）可忽略，换来的是
-        # "任何时刻中断最多损失一条"的容错性
+        pending_checkpoint_rows += 1
         elapsed = elapsed_before + time.perf_counter() - started
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path.write_text(json.dumps({"version": "szy", "duration": elapsed, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 批量落盘 checkpoint（粒度 = config.batch_writes）：全量结果
+        # JSON 可能几 MB，每条样本都重写会把 IO 放大成瓶颈；批量写的
+        # 代价是"中断最多损失一个批次"，秒级推理下可接受
+        if pending_checkpoint_rows >= max(config.batch_writes, 1):
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint_path.write_text(json.dumps({"version": "szy", "duration": elapsed, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+            pending_checkpoint_rows = 0
     duration = elapsed_before + time.perf_counter() - started
+    # 正常结束时保存尾部不足一个批次的结果；恰好落盘则不重复重写
+    if pending_checkpoint_rows or not checkpoint_path.is_file():
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(json.dumps({"version": "szy", "duration": duration, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 收尾把 ASR 缓存里最后不足一批的条目落盘（进程内缓存始终有，
+    # 是否持久化由配置控制）
+    runner.flush_caches()
 
     # ---- 汇总 + 提交物 ----
     summary = summarize(results, duration)
     summary["route"] = "szy"                     # 汇总也带上路线标记（审计口径）
     write_outputs(results, summary, Path(args.output), Path(args.final_output))
+    _auto_report(Path(args.final_output))
 
     # ---- manifest：资产指纹（哪份配置 + 哪份权重跑出来的，可追溯） ----
     # 三份关键权重的 SHA-256：实验复现的第一道保险。文件名可能被替换

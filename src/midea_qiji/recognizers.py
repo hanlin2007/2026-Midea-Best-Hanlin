@@ -38,6 +38,7 @@ ConditionedQwenRecognizer。
 """
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -96,12 +97,21 @@ class FireRedRecognizer:
     AED = Attention Encoder-Decoder：端到端自回归解码，无 LLM 大解码器，
     速度与显存开销都比 LLM 版小；转写时输出带置信度的行。
 
+    生产上唤醒与命令通道**共用同一份 AED 权重**：唤醒侧需要稳定的
+    beam=1 解码、命令侧需要 beam=3 + ELM，过去为此驻留两份模型
+    （显存 ~7.4 GB），现在用 ``temporary_beam_size`` /
+    ``temporary_elm_weight`` 两个上下文管理器在共享实例上临时改解码
+    配置（峰值显存降到 4818 MiB），还顺带消除了两份模型同时在显存里
+    造成的数值/内核选择抖动。
+
     依赖：kaldi_native_fbank（装在 vendor 目录，不污染共享 conda）+
     FireRedASR2S 源码仓库（examples_infer/asr 下的 fireredasr2 包）。
     """
 
     def __init__(self, model_dir: str | Path, device: str, repo_root: str | Path,
-                 vendor_root: str | Path = DEFAULT_FIRED_VENDOR) -> None:
+                 vendor_root: str | Path = DEFAULT_FIRED_VENDOR,
+                 beam_size: int = 1, nbest: int = 1,
+                 elm_dir: str | Path | None = None, elm_weight: float = 0.0) -> None:
         import sys
 
         # sys.path 注入：fireredasr2 包不在 pip 安装体系里（源码仓库 +
@@ -115,6 +125,11 @@ class FireRedRecognizer:
                 sys.path.insert(0, path)
         from fireredasr2.asr import FireRedAsr2, FireRedAsr2Config
 
+        self._beam_size = beam_size
+        self._nbest = nbest
+        # elm_dir 在构造时一次性消费（ELM 权重常驻）；之后靠 elm_weight
+        # 开关（见 temporary_elm_weight），不需要为"用/不用 ELM"准备两份模型
+        resolved_elm_dir = "" if elm_dir is None else str(Path(elm_dir).resolve())
         self._model = FireRedAsr2.from_pretrained(
             "aed",                            # 选 AED 版 checkpoint（而非 llm 版）
             str(Path(model_dir).resolve()),   # 绝对路径，避免工作目录变化导致找不到
@@ -122,8 +137,8 @@ class FireRedRecognizer:
                 # 下面一组是历史调参结果（zjm v2 实测的配置），勿动。
                 use_gpu=device.startswith("cuda"),   # GPU 与否由 device 决定
                 use_half=device.startswith("cuda"),  # GPU 上才用半精度
-                beam_size=1,                  # 束宽 1 = 贪心解码（速度优先）
-                nbest=1,                      # 只要 1-best 结果
+                beam_size=beam_size,          # 束宽（1 = 贪心；生产命令通道用 3）
+                nbest=nbest,                  # N-best 列表长度（<= beam_size）
                 decode_max_len=0,             # 解码长度上限（0 = 默认行为）
                 softmax_smoothing=1.25,       # 输出分布平滑系数（历史调参值）
                 aed_length_penalty=0.6,       # AED 长度惩罚（历史调参值）
@@ -133,8 +148,8 @@ class FireRedRecognizer:
                 repetition_penalty=1.0,       # 1.0 = 不惩罚重复
                 llm_length_penalty=0.0,       # AED 版不用 LLM 相关参数
                 temperature=1.0,              # 1.0 = 不缩放 logits
-                elm_dir="",                   # 不使用 ELM 外部语言模型
-                elm_weight=0.0,
+                elm_dir=resolved_elm_dir,     # ELM 外部语言模型目录（"" = 不加载）
+                elm_weight=elm_weight,        # ELM 融合权重（0.0 = 解码时不参与）
             ),
         )
 
@@ -154,6 +169,133 @@ class FireRedRecognizer:
             raise RuntimeError("FireRed returned an unexpected result count")
         # 按输入顺序回填文本，并做统一归一化。
         return [normalize_transcript(str(mapped[uid].get("text", ""))) for uid in utterance_ids]
+
+    @contextlib.contextmanager
+    def temporary_beam_size(self, beam_size: int):
+        """Temporarily change the AED decoder beam for one sequential call.
+
+        ``nbest`` is clamped to the new beam because FireRedAsr2 requires
+        ``nbest <= beam_size``; both fields are restored on exit.
+
+        （中文）上下文管理器（@contextlib.contextmanager 装饰器把"生成器
+        函数"变成 with 语句可用的上下文）：with 块内把解码束宽临时改成
+        指定值，退出时（无论正常结束还是异常）恢复原值。生产用法：共享
+        AED 实例上，唤醒通道 ``temporary_beam_size(1)`` 求稳、命令通道
+        用构造时的 beam=3。yield 之前的代码在进 with 时执行，之后的在
+        退出时执行——try/finally 保证异常也一定能还原，不会把"临时"
+        配置泄漏到后续解码。
+        """
+        if beam_size < 1:
+            raise ValueError("FireRed beam size must be positive")
+        previous_beam = self._model.config.beam_size
+        previous_nbest = self._model.config.nbest
+        self._model.config.beam_size = beam_size
+        self._model.config.nbest = min(previous_nbest, beam_size)
+        try:
+            yield
+        finally:
+            self._model.config.beam_size = previous_beam
+            self._model.config.nbest = previous_nbest
+
+    @contextlib.contextmanager
+    def temporary_elm_weight(self, elm_weight: float):
+        """Temporarily enable/disable ELM on a shared AED instance.
+
+        ``elm_dir`` is consumed once at construction (the ELM is already
+        resident); FireRedAsr2 reads ``config.elm_weight`` at decode time, so
+        toggling the weight is enough to share one AED across ELM/non-ELM
+        decodes instead of loading a second copy of the weights.
+
+        （中文）ELM 权重在构造时已随模型常驻显存，FireRedAsr2 解码时读取
+        的是 config.elm_weight——所以"开/关 ELM"只需临时改这个标量，
+        不必再加载一份模型。生产用法：所有参与门控/路由决策的转写一律
+        ``temporary_elm_weight(0.0)``（保持 confidence 量程干净），只有
+        路由选定后的最终通道才用配置的权重重解码一次。
+        """
+        previous = self._model.config.elm_weight
+        self._model.config.elm_weight = float(elm_weight)
+        try:
+            yield
+        finally:
+            self._model.config.elm_weight = previous
+
+    def transcribe_many_with_confidence(self, audio_paths: list[Path]) -> list[dict[str, Any]]:
+        """Transcribe audio and return both text and confidence scores.
+
+        Args:
+            audio_paths: List of audio file paths
+
+        Returns:
+            List of {"text": str, "confidence": float}
+        """
+        if not audio_paths:
+            return []
+        utterance_ids = [f"utt_{index}" for index in range(len(audio_paths))]
+        with suppress_model_output():
+            rows = self._model.transcribe(utterance_ids, [str(path) for path in audio_paths])
+        mapped = {str(row.get("uttid")): row for row in rows}
+        if len(mapped) != len(audio_paths):
+            raise RuntimeError("FireRed returned an unexpected result count")
+
+        results = []
+        for uid in utterance_ids:
+            row = mapped[uid]
+            results.append({
+                "text": normalize_transcript(str(row.get("text", ""))),
+                "confidence": float(row.get("confidence", 0.0)),
+            })
+        return results
+
+    def transcribe_many_nbest(self, audio_paths: list[Path]) -> list[list[dict[str, Any]]]:
+        """Transcribe audio and return N-best hypotheses for each audio.
+
+        Requires nbest > 1 in __init__. Each audio returns a list of hypotheses
+        sorted by confidence (highest first).
+
+        （中文）N-best 列表是 beam 搜索的副产品：beam=3 解码时模型本来就
+        维护了多条候选，顺手取出（不再多花一次推理），供保守 MBR 重排序
+        使用（见 midea_qiji.firered_nbest）。构造时 nbest<2 则退化为单候选。
+
+        Args:
+            audio_paths: List of audio file paths
+
+        Returns:
+            List of hypothesis lists, where each hypothesis is {"text": str, "confidence": float}
+        """
+        if not audio_paths:
+            return []
+        if self._nbest < 2:
+            # Fallback to single hypothesis if nbest not configured
+            single_results = self.transcribe_many_with_confidence(audio_paths)
+            return [[result] for result in single_results]
+
+        utterance_ids = [f"utt_{index}" for index in range(len(audio_paths))]
+        with suppress_model_output():
+            rows = self._model.transcribe(utterance_ids, [str(path) for path in audio_paths])
+        mapped = {str(row.get("uttid")): row for row in rows}
+        if len(mapped) != len(audio_paths):
+            raise RuntimeError("FireRed returned an unexpected result count")
+
+        all_nbest = []
+        for uid in utterance_ids:
+            row = mapped[uid]
+            # Extract nbest list from row
+            nbest_list = row.get("nbest", [])
+            if not nbest_list:
+                # Fallback: create single hypothesis from main result
+                nbest_list = [{
+                    "text": row.get("text", ""),
+                    "confidence": row.get("confidence", 0.0),
+                }]
+
+            hypotheses = []
+            for hyp in nbest_list:
+                hypotheses.append({
+                    "text": normalize_transcript(str(hyp.get("text", ""))),
+                    "confidence": float(hyp.get("confidence", 0.0)),
+                })
+            all_nbest.append(hypotheses)
+        return all_nbest
 
 
 class FireRedLLMRecognizer:

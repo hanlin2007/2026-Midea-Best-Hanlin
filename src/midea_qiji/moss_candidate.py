@@ -39,6 +39,7 @@ from __future__ import annotations  # 延迟求值注解（int | None 等），�
 from dataclasses import dataclass  # 免手写 __init__/__repr__；frozen=True 提供冻结语义
 from typing import Any  # as_float 的缓存字典值类型未知，用 Any 表达"来者不拒"
 
+from .phoneme import phoneme_similarity              # 拼音空间相似度（锚点选择打分）
 from .text import levenshtein, normalize_transcript  # 相对导入：内核层内部引用，与包名解耦
 
 
@@ -66,10 +67,11 @@ class WakeAnchorDecision:
       - selected_source / contrast_source：选中哪一路做锚点、哪一路做
         "同分离域对比项"（同一批分离产物里的另一路，用来构造差分证据）；
       - raw_wake_fallback：是否退回"整段原始唤醒音频"当锚点（分离产物
-        不可用时走这条路）；
-      - text_tie：两路文本与唤醒文本的编辑距离是否打平；
-      - source0_edit / source1_edit：两路各自的编辑距离；None 表示该侧
-        没有转写、无从比较（对应注解里的 int | None）；
+        不可用、或两路拼音相似度打平无法裁决时走这条路）；
+      - text_tie：两路与唤醒文本的拼音相似度是否打平；
+      - source0_sim / source1_sim：两路各自的拼音相似度（负的拼音编辑
+        距离，0 = 读音完全一致，越大越像）；None 表示该侧没有转写、
+        无从比较（对应注解里的 float | None）；
       - reason：人类可读的决策路径标识（写进报告，排查时一眼定位走了
         哪个分支）。
     """
@@ -78,8 +80,8 @@ class WakeAnchorDecision:
     contrast_source: int
     raw_wake_fallback: bool
     text_tie: bool
-    source0_edit: int | None
-    source1_edit: int | None
+    source0_sim: float | None
+    source1_sim: float | None
     reason: str
 
 
@@ -111,63 +113,78 @@ def select_wake_anchor(
     source0_text: str | None,
     source1_text: str | None,
 ) -> WakeAnchorDecision:
-    """Select the source that uttered ``wake_text`` using legacy-compatible rules.
+    """Select the source that uttered ``wake_text`` using phoneme similarity.
 
     A missing transcript marks the corresponding separated source as unusable
     for enrollment.  The full wake waveform is then the anchor, while the
     silent source remains a same-separation contrast term.  When both sources
-    contain speech, unnormalized character edit distance preserves the exact
-    historical selection behavior.
+    contain speech, phoneme (pinyin) similarity selects the best match, with
+    wake-word aliases expanded; a similarity tie falls back to the raw wake.
 
-    （中文）裁决流程（三分支）：
+    （中文）裁决流程（四分支）：
       1. 只有一路有转写：selected_source 记有声那路，但
          raw_wake_fallback=True 表示实际锚点退回整段原始唤醒音频
          （静默路没有成对信息可用），静默路仅作同分离域的对比项；
-      2. 两路都有转写：谁与唤醒文本的编辑距离小选谁——编辑距离度量
-         "哪路的内容更像目标人说的唤醒词"（见 text.levenshtein）；
-      3. 两路都空（退化情形）：沿用历史管线的行为——选 source0、锚点
-         用原始唤醒音频、对比项也设成 0。这个分支几乎不会出现，但必须
-         与历史逐字一致：缓存重放要求确定性，"顺手改成更合理的写法"
-         都会让重放结果对不上历史产物。
-    历史兼容说明：唤醒文本（人工标注）走 normalize_transcript 归一化；
-    而 source0/source1 的转写只做 strip()——因为历史缓存写盘时它们已经
-    是 FireRed 归一化后的字符串，重放直接用原串比对编辑距离，才能逐字
-    复现当年的决策（见下方英文注释）。
+      2. 两路都有转写：谁与唤醒文本的**拼音相似度**高选谁——拼音相似度
+         度量"哪路的读音更像唤醒词"，同音字错误（"科慕"vs"科目"）不受
+         惩罚（见 phoneme.py 的模块文档）；参考文本命中别名表时会展开
+         所有变体取最高分；
+      3. 两路拼音相似度打平：无法可靠裁决，锚点退回原始唤醒音频
+         （raw_wake_fallback=True）。打平说明两路"听起来一样像"，选错
+         一路的代价高于用混合音频的代价，保守回退；
+      4. 两路都空（退化情形）：沿用历史行为——选 source0、锚点用原始
+         唤醒音频、对比项也设成 0，保证缓存重放确定性。
+    历史沿革：本规则曾是字符编辑距离版本（v4 及更早），拼音版在 DatasetA
+    上是全系统最大的单项护城河之一（51 条锚点选择不同带来 81 字优势，
+    见 docs/OPTIMIZATION_SUMMARY.md 附录）。source0_sim/source1_sim 字段
+    存的是拼音相似度（负距离），不是字符编辑距离。
     """
 
     reference = normalize_transcript(wake_text or "")  # 唤醒文本统一口径后再比对（None 兜底成空串）
     # Candidate transcripts were already normalized by FireRed when the
     # historical cache was written.  Replay uses those cached strings directly
-    # for emptiness and edit distance rather than normalizing them again.
-    # （中文）这段注释是"复现优先"原则的典型例子：即使"再归一化一次"看
-    # 似更正确，也会让重放结果偏离当年写盘时的原串——保持与历史逐字一致
-    # 比"逻辑上更漂亮"重要。
+    # for emptiness and similarity rather than normalizing them again.
+    # （中文）"复现优先"原则：分离通道转写只做 strip()——缓存写盘时它们
+    # 已是 FireRed 归一化后的字符串，重放直接用原串比相似度，才能逐字
+    # 复现当时的决策。
     source0 = str(source0_text or "").strip()  # 只去首尾空白：缓存里的字符串已是归一化文本
     source1 = str(source1_text or "").strip()
-    has0, has1 = bool(source0), bool(source1)  # "该路是否有内容"：有内容才能参与编辑距离比较
+    has0, has1 = bool(source0), bool(source1)  # "该路是否有内容"：有内容才能参与相似度比较
 
     if has0 and not has1:  # 分支 1a：只有 source0 有声 -> 它当锚点，静默的 source1 当对比项
         return WakeAnchorDecision(0, 1, True, False, None, None, "source1_empty_raw_wake")
     if has1 and not has0:  # 分支 1b：对称情形
         return WakeAnchorDecision(1, 0, True, False, None, None, "source0_empty_raw_wake")
 
-    edit0 = levenshtein(source0, reference)  # 两路都有转写：各自与唤醒文本比编辑距离
-    edit1 = levenshtein(source1, reference)
-    selected = 0 if edit0 <= edit1 else 1  # 距离小者胜；平手取 source0（<= 而非 <，复刻历史比较）
-    tie = not reference or edit0 == edit1  # reference 为空时编辑距离无意义，一律视为打平
+    sim0 = phoneme_similarity(source0, reference)  # 两路都有转写：各自与唤醒文本比拼音相似度
+    sim1 = phoneme_similarity(source1, reference)
+    selected = 0 if sim0 >= sim1 else 1  # 相似度高者胜；平手先记 source0（>= 而非 >，复刻历史比较）
+    tie = not reference or sim0 == sim1  # reference 为空时相似度无意义，一律视为打平
     if not has0 and not has1:
         # The old pipeline used source 0 as a contrast term in this degenerate
         # case.  Keeping it makes cached replay deterministic.
         # （中文）双空退化分支：保留历史行为以保证缓存重放确定性。
-        return WakeAnchorDecision(selected, 0, True, tie, edit0, edit1, "both_sources_empty_raw_wake")
+        return WakeAnchorDecision(selected, 0, True, tie, sim0, sim1, "both_sources_empty_raw_wake")
+    if tie:
+        # 拼音打平：两路"听起来一样像"，无法可靠裁决，锚点退回原始唤醒
+        # 音频（保守方向：混合音频里至少有完整的目标人嗓音）。
+        return WakeAnchorDecision(
+            selected,
+            1 - selected,  # 对比项 = 没被选中的那一路（同一批分离产物里的另一路）
+            True,
+            tie,
+            sim0,
+            sim1,
+            "wake_text_phoneme_similarity",
+        )
     return WakeAnchorDecision(
         selected,
-        1 - selected,  # 对比项 = 没被选中的那一路（同一批分离产物里的另一路）
+        1 - selected,
         False,
         tie,
-        edit0,
-        edit1,
-        "wake_text_edit_distance",
+        sim0,
+        sim1,
+        "wake_text_phoneme_similarity",
     )
 
 
@@ -212,27 +229,44 @@ def normalized_edit_distance(left: str | None, right: str | None) -> float:
     return levenshtein(a, b) / max(len(a), len(b), 1)
 
 
-def should_switch_command_timbre(*, confidence: float, command_keyword_score: float, sv_diff: float) -> bool:
-    """音色触发规则（SZY 生产管线当前采用）。
+def should_switch_command_timbre(
+    *,
+    confidence: float,
+    command_keyword_score: float,
+    sv_diff: float,
+    confidence_high: float = 0.70,
+    confidence_low: float = 0.57,
+    sv_diff_tau: float = 0.05,
+) -> bool:
+    """音色触发规则（历史 V100 路线采用；现产线由声学单双人路由接管）。
 
     sv_diff = max(cos(anchor, cmd_ms0), cos(anchor, cmd_ms1)) - cos(anchor, raw_cmd)，
     直接测量"目标嗓音在分离通道里是否比在原始混合里更突出"——切换收益的
-    物理机制本身。三特征分工：conf 管必坏线（<=0.57 必切）、sv_diff 管主判决、
-    kw 管高置信否决（自信转写但不像指令 + 音色说分离更好 => 转错了人）。
-    DatasetA：CER 0.3058（文本规则 0.3092 / cps 规则 0.3181）；
-    τ 盆地 [0.02, 0.08] 平坦，conf 切点在 [0.50,0.70]x[0.65,0.80] 内平坦。
+    物理机制本身。三特征分工：conf 管必坏线（<=confidence_low 必切）、
+    sv_diff 管主判决、kw 管高置信否决（自信转写但不像指令 + 音色说分离
+    更好 => 转错了人）。DatasetA：CER 0.3058（文本规则 0.3092 / cps 规则
+    0.3181）；τ 盆地 [0.02, 0.08] 平坦，conf 切点在 [0.50,0.70]x[0.65,0.80]
+    内平坦。
 
     （中文补充）与 should_switch_command 同构的两段式结构，只是把语速
-    特征换成音色差 sv_diff（声纹余弦相似度的差值）：低置信区宽松放行
-    （kw 像指令 / sv_diff 超阈值 / 必坏线），高置信区从严（只有 sv_diff
-    强且内容不像指令才切）。"盆地平坦"是阈值稳健性的证据：阈值在区间内
-    挪一点结果几乎不变，说明规则没有过拟合到某个幸运数字——做阈值类
-    调参时，选盆地中心而不是悬崖边，是通用经验。
+    特征换成音色差 sv_diff（声纹余弦相似度的差值）。"盆地平坦"是阈值
+    稳健性的证据：阈值在区间内挪一点结果几乎不变，说明规则没有过拟合
+    到某个幸运数字——做阈值类调参时，选盆地中心而不是悬崖边，是通用
+    经验。
+
+    三个切点已参数化（confidence_high / confidence_low / sv_diff_tau）。
+    默认值 0.70 / 0.57 / 0.05 是 ELM 融入主解码时代（confidence 被压到
+    ~0.60 量程）标定的历史值；ELM 改为选择后重解码之后 confidence 回到
+    ~0.88 量程，在新量程上重扫的值是 0.88 / 0.76 / -0.03（见生产配置
+    configs/pipeline_firered.json 的 firered_switch_* 三项）。沿用旧默认
+    值跑新量程实测掉 0.0027 分，切勿不标定就混用。
+    注意：现役产线的指令路由已由声学单双人分类器接管（见
+    szy.pipeline.SzyRunner.process），本规则保留用于历史重放与消融对照。
     """
 
-    if confidence <= 0.70:  # 低置信区：三个"或"条件，任一命中即切换
-        return command_keyword_score >= 0.5 or sv_diff > 0.05 or confidence <= 0.57
-    return sv_diff > 0.05 and command_keyword_score < 0.5  # 高置信区：音色证据强且内容不像指令才切
+    if confidence <= confidence_high:  # 低置信区：三个"或"条件，任一命中即切换
+        return command_keyword_score >= 0.5 or sv_diff > sv_diff_tau or confidence <= confidence_low
+    return sv_diff > sv_diff_tau and command_keyword_score < 0.5  # 高置信区：音色证据强且内容不像指令才切
 
 
 def should_switch_command_text(*, confidence: float, command_keyword_score: float, d_sel: float) -> bool:

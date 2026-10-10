@@ -16,6 +16,8 @@
 分层职责（子模块按依赖从底向上）：
 
   - ``text.py``         文本归一化 / 编辑距离 / CER（仅标准库）；
+  - ``phoneme.py``      拼音音素相似度与唤醒词别名表（pypinyin 可选）；
+  - ``firered_nbest.py`` FireRed N-best 候选的保守 MBR 重排序；
   - ``audio.py``        采样率常量与 WAV 读取（numpy / soundfile）；
   - ``paths.py``        仓库内模型路径常量与本地模型解析（仅标准库）；
   - ``recognizers.py``  Qwen3-ASR / FireRed AED / FireRed LLM / 条件 LoRA

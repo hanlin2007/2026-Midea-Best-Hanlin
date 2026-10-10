@@ -191,16 +191,17 @@ class ModelScopeEmbedder:
         # 告诉 pipeline 该挂哪套预处理/后处理逻辑。
         self.pipeline = pipeline(task=Tasks.speaker_verification, model=str(model), device=device)
 
-    def extract_waveforms(self, waveforms: Sequence[np.ndarray]) -> list[np.ndarray]:
-        """批量提取 L2 归一化声纹 embedding，输出顺序与输入一一对应。
+    def prepare_waveforms(self, waveforms: Sequence[np.ndarray]) -> list:
+        """批量提取声学特征（Fbank），输出顺序与输入一一对应。
 
-        归一化的意义：把每个 embedding 缩放到单位长度，之后余弦相似度
-        退化为点积，且消除绝对尺度（响度/模型输出量级）差异。
+        拆分出本方法的原因：预训练与微调两个前端的**声学前端完全相同**
+        （同一 ERes2NetV2 基座，只是 embedding_model 权重不同），融合门控
+        对 5 段波形各提一次特征后，两个前端共享这份特征各自前向
+        embedding_model——Fbank 计算量直接省一半，且不增加并发激活显存。
+        返回的是 torch 张量列表（具体类型属于 pipeline 内部实现，故不标注）。
         """
         if not waveforms:
-            return []          # 空输入直接返回空列表，避免下游空批次出错
-        import torch          # torch 同样延迟导入（原因见 __init__ 注释）
-
+            return []
         # pipeline.preprocess 把原始波形（float 数组）转成模型要吃的
         # feature 张量（分帧、加窗、fbank 等声学前端处理）。
         prepared = self.pipeline.preprocess(list(waveforms))
@@ -217,7 +218,19 @@ class ModelScopeEmbedder:
             raise AttributeError(f"no __extract_feature on {type(model).__name__}")
         # 逐条提声学特征；一维波形补一个 batch 维（unsqueeze(0)），
         # 模型内部约定输入形如 (batch, frames, feat)。
-        features = [extract_feature(w.unsqueeze(0) if w.ndim == 1 else w) for w in prepared]
+        return [extract_feature(w.unsqueeze(0) if w.ndim == 1 else w) for w in prepared]
+
+    def extract_features(self, features: list) -> list[np.ndarray]:
+        """对已提取的声学特征批量前向 embedding_model，输出 L2 归一化 embedding。
+
+        与 :meth:`prepare_waveforms` 配套：调用方先 prepare 一次，再把同一份
+        特征分别喂给两个前端的 extract_features（见 szy.pipeline.FusionGate）。
+        """
+        if not features:
+            return []
+        import torch          # torch 同样延迟导入（原因见 __init__ 注释）
+
+        model = self.pipeline.model
         # 按"帧数"（时间维长度）分组：同批 cat 拼接要求该维等长；
         # defaultdict(list) 免去"先判断 key 是否存在"的样板代码。
         by_frame_count: dict[int, list[int]] = defaultdict(list)
@@ -247,6 +260,16 @@ class ModelScopeEmbedder:
             # 防止零向量触发除零。
             normalized.append((embedding / max(norm, 1e-8)).astype(np.float32))
         return normalized
+
+    def extract_waveforms(self, waveforms: Sequence[np.ndarray]) -> list[np.ndarray]:
+        """批量提取 L2 归一化声纹 embedding，输出顺序与输入一一对应。
+
+        归一化的意义：把每个 embedding 缩放到单位长度，之后余弦相似度
+        退化为点积，且消除绝对尺度（响度/模型输出量级）差异。
+        本方法 = prepare_waveforms + extract_features 的组合便捷入口；
+        需要两个前端共享特征时（融合门控）请显式分两步调用。
+        """
+        return self.extract_features(self.prepare_waveforms(waveforms))
 
 
 class DualMLPGate:

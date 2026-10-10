@@ -144,3 +144,215 @@ def write_outputs(results: list[dict[str, Any]], summary: dict[str, Any], output
         encoding="utf-8",
     )
     detail.write_text(json.dumps({"summary": summary, "results": details}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ----------------------------------------------------------------------
+# 人类可读报告（每次管线运行后自动生成，供逐样本排查）
+# ----------------------------------------------------------------------
+
+def _fmt(val, digits=4):
+    """把 detail.json 里的字段格式化成短字符串；空值显示为 "-"。"""
+    if val is None or val == "":
+        return "-"
+    try:
+        return f"{float(val):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(val)
+
+
+def _tag(route, accepted, selected_candidate):
+    """给每条样本一个一眼可读的路由标签。"""
+    if not accepted:
+        return "REJECTED"
+    if route in ("raw", "raw_command_single", "both_single_raw"):
+        return "RAW (kept)"
+    if route == "moss_candidate":
+        ch = selected_candidate if selected_candidate else "ms0"
+        return f"SEPARATED ({ch} chosen)"
+    if "error" in route or "fallback" in route:
+        return f"ERROR ({route})"
+    return route
+
+
+def generate_report(detail_path: str | Path) -> str:
+    """从 detail.json 生成人类可读的纯文本报告（聚合指标 + 逐样本明细）。
+
+    报告的用途是"逐样本病历"：每条样本给出标注 vs 输出 vs CER、唤醒
+    通道转写与锚点标记、逐通道余弦、门控分数与路由决策，排查掉分样本
+    时不必在 JSON 里翻字段。管线每次运行结束自动调用（见 szy.cli），
+    也可离线单独生成：``python scripts/generate_report.py <detail.json>``。
+    """
+    data = json.loads(Path(detail_path).read_text(encoding="utf-8"))
+    summary = data.get("summary", {})
+    results = data.get("results", [])
+
+    lines: list[str] = []
+
+    pr = summary.get("final_pr", 0)
+    rr = summary.get("final_rr", 0)
+    cer = summary.get("final_cer", 0)
+    score = (1 - cer + rr) / 2 if cer is not None else 0
+    dur = summary.get("duration", 0)
+    n = summary.get("sample_count", len(results))
+    n_pos = summary.get("positive_count", 0)
+    n_neg = summary.get("negative_count", 0)
+    n_acc_pos = summary.get("positive_nonempty", 0)
+    n_rej_neg = summary.get("negative_rejects", 0)
+    switches = summary.get("switches", 0)
+    sep_errors = summary.get("separation_errors", 0)
+    total_chars = summary.get("characters", 0)
+    total_errors = summary.get("errors", 0)
+    routes = summary.get("routes", {})
+
+    lines.append("=" * 72)
+    lines.append("  SZY Pipeline Report")
+    lines.append(f"  Generated from: {Path(detail_path).resolve()}")
+    lines.append("=" * 72)
+    lines.append("")
+    lines.append("--- Aggregate Metrics ---")
+    lines.append(f"  Samples       : {n}  (positive {n_pos}, negative {n_neg})")
+    lines.append(f"  PR            : {pr:.4f}  ({n_acc_pos}/{n_pos} accepted with non-empty output)")
+    lines.append(f"  RR            : {rr:.4f}  ({n_rej_neg}/{n_neg} negatives correctly rejected)")
+    lines.append(f"  CER           : {cer:.4f}  ({total_errors}/{total_chars} characters wrong)")
+    lines.append(f"  Score         : {score:.4f}  = (1 - CER + RR) / 2")
+    lines.append(f"  Duration      : {dur:.1f}s")
+    lines.append(f"  Switches      : {switches} triggered out of {n}")
+    lines.append(f"  Sep Errors    : {sep_errors}")
+    lines.append("")
+    lines.append("--- Route Distribution ---")
+    for route_name, count in sorted(routes.items(), key=lambda x: -x[1]):
+        lines.append(f"  {route_name:30s} : {count:5d}  ({count/n*100:.1f}%)" if n else f"  {route_name}: {count}")
+    lines.append("")
+
+    lines.append("=" * 72)
+    lines.append("  Per-Sample Results")
+    lines.append("=" * 72)
+
+    for idx, row in enumerate(results, start=1):
+        sid = row.get("id", f"sample_{idx}")
+        sample_type = row.get("sample_type", "unknown")
+        label = row.get("label")
+        content = row.get("content", "")
+        cer_val = row.get("cer")
+        sv_score = row.get("sv_score")
+        accepted = row.get("accepted", False)
+        route = row.get("route", "")
+        selected = row.get("selected_candidate", "")
+        switch = row.get("switch_triggered", False)
+        error = row.get("error")
+        raw_conf = row.get("raw_confidence")
+        sv_diff = row.get("sv_diff")
+        duration = row.get("item_duration")
+
+        raw_text = row.get("raw_text")
+        cmd0_text = row.get("command_source0_text")
+        cmd1_text = row.get("command_source1_text")
+        wake0_text = row.get("wake_source0_text")
+        wake1_text = row.get("wake_source1_text")
+        wake_sel = row.get("wake_selected_source")
+        wake_fallback = row.get("wake_raw_fallback")
+        wake_tie = row.get("wake_text_tie")
+        wake_contrast = row.get("wake_contrast_source")
+        wake_reason = row.get("wake_reason")
+        wake_sim0 = row.get("wake_source0_sim")
+        wake_sim1 = row.get("wake_source1_sim")
+        ft_cos_cmd0 = row.get("ft_cos_ms0")
+        ft_cos_cmd1 = row.get("ft_cos_ms1")
+
+        is_pos = sample_type == "positive"
+        tag = _tag(route, accepted, selected)
+        is_correct = (cer_val is not None and float(cer_val) == 0.0) if is_pos else (not content and not label)
+        correctness = "CORRECT" if is_correct else ("ERROR" if is_pos and cer_val and float(cer_val) > 0 else "REJECTED" if not is_pos else "")
+
+        lines.append("")
+        lines.append(f"  [{idx:>5d}] {sid}")
+        lines.append(f"         Type: {sample_type.upper()}  |  Tag: {tag}  |  {correctness}")
+        lines.append(f"      {'':->64s}")
+
+        if is_pos:
+            lines.append(f"         Ground Truth : {label}")
+            lines.append(f"         Final Output : {content}")
+            lines.append(f"         Item CER     : {_fmt(cer_val)}")
+        else:
+            lines.append(f"         Final Output : '{content}' (should be empty)")
+
+        # ---- 唤醒通道：转写 + 锚点选择依据 ----
+        if wake0_text is not None or wake1_text is not None:
+            wake_text = row.get("wake_text") or "(not provided)"
+            lines.append("")
+            lines.append("         --- Wake Audio Channels ---")
+            lines.append(f"           Ground truth wake text : {wake_text}")
+
+            ws0 = "" if wake_sel != 0 else " <-- ANCHOR (adopted)"
+            ws1 = "" if wake_sel != 1 else " <-- ANCHOR (adopted)"
+            ws0_c = "" if wake_contrast != 0 else " <-- contrast"
+            ws1_c = "" if wake_contrast != 1 else " <-- contrast"
+            lines.append(f"           ms0 transcription : {wake0_text}{ws0}{ws0_c}")
+            lines.append(f"           ms1 transcription : {wake1_text}{ws1}{ws1_c}")
+            lines.append(f"           Text tie          : {'YES' if wake_tie else 'no'}")
+            lines.append("           Anchor Selection:")
+            if wake_fallback:
+                lines.append("             -> Used RAW wake audio as anchor (fallback)")
+            else:
+                lines.append(f"             -> Anchor = ms{wake_sel} (by {wake_reason})")
+
+            if wake_sim0 is not None or wake_sim1 is not None:
+                lines.append("           Phoneme Similarity vs wake text:")
+                lines.append(f"             sim(ms0, ref)  : {_fmt(wake_sim0, 4)}")
+                lines.append(f"             sim(ms1, ref)  : {_fmt(wake_sim1, 4)}")
+
+        # ---- 指令通道：各候选转写 + 选路依据 ----
+        if raw_text or cmd0_text or cmd1_text:
+            lines.append("")
+            lines.append("         --- Command Audio Channels ---")
+            if raw_text is not None:
+                raw_mark = " <-- CHOSEN (kept raw)" if selected == "orig" and route in ("raw", "raw_command_single", "both_single_raw") else (" <-- KEPT RAW" if selected == "orig" else "")
+                lines.append(f"             raw (direct)       : {raw_text}{raw_mark}")
+            if cmd0_text is not None:
+                sel_mark0 = " <-- CHOSEN" if selected == "ms0" else ""
+                lines.append(f"             cmd src0 (ms0)     : {cmd0_text}{sel_mark0}")
+            if cmd1_text is not None:
+                sel_mark1 = " <-- CHOSEN" if selected == "ms1" else ""
+                lines.append(f"             cmd src1 (ms1)     : {cmd1_text}{sel_mark1}")
+            if selected not in ("orig", "", None) and raw_text:
+                lines.append(f"             -> Switched from raw to separated {selected}")
+            elif selected == "orig":
+                lines.append("             -> Kept raw output")
+
+            lines.append("           Cosine Similarity vs Anchor (finetuned):")
+            lines.append(f"             cos(anchor, cmd_ms0): {_fmt(ft_cos_cmd0):>7}")
+            lines.append(f"             cos(anchor, cmd_ms1): {_fmt(ft_cos_cmd1):>7}")
+            if ft_cos_cmd0 and ft_cos_cmd1:
+                try:
+                    c0 = float(ft_cos_cmd0)
+                    c1 = float(ft_cos_cmd1)
+                    winner = "ms0" if c0 >= c1 else "ms1"
+                    lines.append(f"             ft winner             : {winner} (cos={max(c0,c1):.4f} vs {min(c0,c1):.4f}, delta={abs(c0-c1):.4f})")
+                except (TypeError, ValueError):
+                    pass
+
+        # ---- 门控分数与后处理痕迹 ----
+        lines.append("")
+        lines.append("         --- Gate Scores ---")
+        lines.append(f"             SV score        : {_fmt(sv_score, 4)}  (threshold: {row.get('sv_accept_threshold', '-')})")
+        lines.append(f"             Accepted        : {'YES' if accepted else 'no'}")
+        lines.append(f"             Raw confidence  : {_fmt(raw_conf, 4)}")
+        lines.append(f"             SV diff         : {_fmt(sv_diff, 4)}")
+        lines.append(f"             Switch triggered: {'YES' if switch else 'no'}")
+        if row.get("nbest_applied") or row.get("elm_applied"):
+            lines.append(f"             N-best applied  : {'YES' if row.get('nbest_applied') else 'no'}  ({row.get('nbest_reason', '-')})")
+            lines.append(f"             ELM applied     : {'YES' if row.get('elm_applied') else 'no'}")
+            if row.get("baseline_content") != content:
+                lines.append(f"             Baseline text   : {row.get('baseline_content')}")
+        if duration:
+            lines.append(f"         Item duration     : {duration}s")
+        if error:
+            lines.append(f"         ERROR: {error}")
+
+    lines.append("")
+    lines.append("=" * 72)
+    lines.append(f"  End of Report ({n} samples)")
+    lines.append("=" * 72)
+    lines.append("")
+
+    return "\n".join(lines)

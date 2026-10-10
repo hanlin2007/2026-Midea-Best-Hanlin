@@ -1,21 +1,24 @@
-"""目标说话人语音指令识别管线引擎（SZY 系统核心模块，无 CLI）。
+"""目标说话人语音指令识别管线引擎（SZY/LSZ 系统核心模块，无 CLI）。
 
-本模块实现整条生产链路的全部决策逻辑（配置、融合门控、逐样本处理），
-入口命令行放在 :mod:`szy.cli`，与引擎分离，方便脚本/测试直接 import 引擎。
-（"无 CLI"是刻意分工：引擎只管"怎么做"，命令行只管"接用户输入"；
-这样测试可以绕过 argparse 直接构造 SzyRunner，脚本也能复用同一引擎。）
+本模块实现整条生产链路的全部决策逻辑（配置、声学路由、融合门控、
+逐样本处理），入口命令行放在 :mod:`szy.cli`，与引擎分离，方便脚本/测试
+直接 import 引擎。（"无 CLI"是刻意分工：引擎只管"怎么做"，命令行只管
+"接用户输入"；这样测试可以绕过 argparse 直接构造 SzyRunner，脚本也能
+复用同一引擎。）
 
-模块内部三件套，自上而下组装：
+模块内部四件套，自上而下组装：
   - :class:`SzyConfig`   frozen dataclass 配置：全部可调参数都在这里；
+  - :class:`AsrCache`    ASR 转写缓存：同一音频在同一解码配置下只解码一次；
   - :class:`FusionGate`  融合门控打分器：一次调用产出"接受判定 + 融合分 +
                          特征明细"三样东西；
-  - :class:`SzyRunner`   逐样本执行器：把"门控 → 转写 → 音色触发 → 候选
-                         选择"整段决策串起来，并负责异常回退。
+  - :class:`SzyRunner`   逐样本执行器：把"声学路由 → 门控 → 转写 → 选择 →
+                         后处理"整段决策串起来，并负责异常回退。
 
 生产链路一句话：
-    唤醒音频定位目标人 → 融合门控判定指令音频是否含目标人 →
-    （接受时）dasynth 微调 MossFormer2 盲分离两路 → FireRed ASR 转写 →
-    音色触发规则决定用原始转写还是分离通道转写，任何异常回退原始转写。
+    MossFormer2 盲分离唤醒/指令音频 → 声学单双人路由（双单人走独立短路：
+    微调声纹 raw 余弦判同人）→ 拼音锚点定位目标人 → 融合门控接受/拒绝 →
+    单人指令只解码原始音频、双人指令只解码 ft 余弦选中的分离通道 →
+    选中通道上做保守 MBR N-best 重排 + ELM 重解码 → 任何异常回退原始转写。
 
 术语速览（初学者）：
   - 声纹 embedding：把一段语音压缩成固定维度的向量，"说话人越像、
@@ -25,17 +28,21 @@
   - 盲分离：不给任何先验地把混合语音拆成两路 ms0/ms1，哪路是目标人
     并不知道，要由余弦打分判定；
   - 唤醒锚点（anchor）：从唤醒音频中定位出的"目标人嗓音的代表"，
-    之后所有余弦比较都以它为参照。
+    之后所有余弦比较都以它为参照；
+  - ELM（外部语言模型）：纠正 ASR 的领域词汇偏向；只作选择后的重解码，
+    不参与任何决策，以免污染置信度量程。
 
-三个关键设计（相对历史路线的演进，细节见 docs/CURRENT_BEST_PIPELINE_SZY_V4.md）：
+三个关键设计（演进细节见 docs/OPTIMIZATION_SUMMARY.md）：
 1. 主门控 = 两个 ERes2NetV2 前端的线性融合门控（官方预训练 + 分离域微调，
-   dataset_dasynth ep6），6 维余弦特征，阈值在 dasynth valid 上标定。
-2. 指令候选用微调模型直接余弦（cos(anchor, ms0) vs cos(anchor, ms1)）
-   选 ms0/ms1，与门控同一打分原理，且复用门控时刻已算的逐通道余弦，
-   不增加额外 embedding 计算。
-3. 切换触发 = 音色规则（confidence × 指令关键词 × sv_diff），其中
-   sv_diff = max cos(anchor, cmd_ms) − cos(anchor, raw_cmd) 衡量"分离是否
-   让目标嗓音比原始混合更突出"——这正是切换本身的物理机制。
+   dataset_dasynth ep6），6 维余弦特征，阈值在 dasynth valid 上标定；
+   两个前端共享同一次 Fbank 声学特征（prepare_waveforms 只跑一遍）。
+2. 指令路由 = 声学单双人分类（szy.single_speaker，纯波形特征、不花 ASR）：
+   双单人走 raw/余弦短路；单人指令解码原始音频；双人指令恒切分离通道，
+   ft 直接余弦选源、且只解码选中的那一路（延迟解码，省一半命令 ASR）。
+3. 所有承载决策的转写一律 ELM 关闭（temporary_elm_weight(0.0)），
+   保证 confidence 量程干净；N-best 重排与 ELM 重解码只在路由选定后
+   对最终通道各跑一次。唤醒与命令共享同一份 AED 权重（峰值显存
+   4818 MiB，约为双实例时代的 2/3）。
 
 依赖方向：本模块只允许向下依赖 szy/（共享工具）与 midea_qiji/（内核）；
 torch 分离器在运行时按需延迟导入（保证无 torch 环境也能 --help / 单测）。
@@ -45,7 +52,7 @@ torch 分离器在运行时按需延迟导入（保证无 torch 环境也能 --h
 # 必须放在除 docstring/注释外的第一条语句（Python 语法要求）
 from __future__ import annotations
 
-import json                                     # 配置 / 融合权重 JSON
+import json                                     # 配置 / 融合权重 JSON / ASR 缓存
 from dataclasses import dataclass               # frozen dataclass（不可变配置）
 from pathlib import Path                        # 面向对象路径
 import time                                     # perf_counter 计时
@@ -54,25 +61,20 @@ from typing import Any                           # 动态类型字段的占位�
 import numpy as np                              # 向量化数值计算（点积 / 矩阵乘）
 
 # ---- midea_qiji 内核（下层依赖，声纹/识别/数据模型/决策规则） ----
+from midea_qiji.firered_nbest import conservative_mbr_rerank
 from midea_qiji.gate import ModelScopeEmbedder, read_wav
 from midea_qiji.infer import (
     Sample,
-    read_many_jsonl,
     submission_id,
+    suppress_model_output,
 )
-from midea_qiji.moss_candidate import (
-    select_wake_anchor,
-    should_switch_command_timbre,
-)
+from midea_qiji.moss_candidate import select_wake_anchor
 from midea_qiji.paths import resolve_model_path
 from midea_qiji.recognizers import FireRedLLMRecognizer, FireRedRecognizer
-# ---- szy 共享工具（同层 helpers） ----
-from szy.helpers import (
-    command_features,
-    duration_seconds,
-    separation_paths_for,
-    transcribe_firered_rows,
-)
+from midea_qiji.text import normalize_transcript
+# ---- szy 共享工具（同层 helpers + 声学单双人路由） ----
+from szy.helpers import separation_paths_for
+from szy.single_speaker import BothSingleRouter
 
 # 融合门控使用的 6 维特征名（顺序固定，与 model/artifacts/gate_fusion.json 一致，
 # 顺序不符会直接报错，防止门控权重与特征错位）。
@@ -119,12 +121,52 @@ class SzyConfig:
     # ASR 后端："aed" = FireRedASR2-AED（生产基线）；"llm" = FireRedASR2-LLM（Qwen2-7B 解码）
     firered_asr_type: str = "aed"
     firered_llm_batch_size: int = 4       # LLM 后端批量大小
+    # ---- 主解码 beam 配置（唤醒通道用 temporary_beam_size(1) 临时压回 1） ----
+    firered_beam_size: int = 3            # 命令通道主解码束宽（beam=3 顺带产出 N-best 候选）
+    # 以下四个 conditional 字段是"条件 beam"实验的遗留配置位（实验未采用，
+    # 见 docs/OPTIMIZATION_SUMMARY.md 附录"未采用的其他项"），保留以兼容
+    # 历史配置文件；当前代码路径不读取它们。
+    firered_beam_mode: str = "always"     # "always" or "conditional"（未采用，保留位）
+    firered_conditional_gate_margin: float = 0.15
+    firered_conditional_switch_margin: float = 0.0
+    firered_conditional_confidence_threshold: float = 0.7
+    # ---- N-best 保守 MBR 重排（路由选定后对选中通道执行一次） ----
+    firered_nbest_mode: str = "off"       # "off" or "conservative_mbr"
+    firered_nbest_beam_size: int = 3      # 历史二次解码用的束宽（现优先复用主解码候选）
+    firered_nbest_count: int = 3          # 参与 MBR 的候选条数
+    firered_nbest_min_confidence_gain: float = 0.03   # 换人闸 1：最低置信度增益
+    firered_nbest_min_mbr_risk_reduction: float = 0.05  # 换人闸 2：最低风险下降
+    # ---- ELM 外部语言模型（只作选择后重解码，不参与主解码/决策） ----
+    firered_elm_dir: str | None = None    # ELM 模型目录；None = 不启用
+    firered_elm_weight: float = 0.0       # ELM 融合权重（生产 0.15）
+    # ELM 重解码使用的 beam。ELM 不再参与主解码，只在路由选定后对选中
+    # 通道重解码一次，因此它的 beam 与主解码的 firered_beam_size 解耦。
+    firered_elm_beam_size: int = 3
+    # ---- 音色切换规则的三个切点（历史 V100 路线；现产线由声学路由接管） ----
+    # 默认值 0.70/0.57/0.05 是 ELM 融入主解码时代（confidence ~0.60 量程）
+    # 标定的历史值；ELM 后处理化之后 confidence 回到 ~0.88 量程，生产配置
+    # 里给的是在新量程上重扫的 0.88/0.76/-0.03。切勿跨量程混用（实测掉 0.0027）。
+    firered_switch_confidence_high: float = 0.70
+    firered_switch_confidence_low: float = 0.57
+    firered_switch_sv_diff_tau: float = 0.05
+    # 命令通道切换策略（历史 V100 重放位）：
+    #   "timbre_rule" —— should_switch_command_timbre(confidence x keyword x sv_diff)
+    #   "always"      —— 无条件采用分离通道（ft 余弦最高的一路），规则短路为恒真
+    # 现产线路由由 both_single_mode 的声学分类器接管，本字段不参与决策。
+    command_switch_mode: str = "timbre_rule"
+    # ---- 声学单双人路由（双单人独立短路；生产显式开启） ----
+    both_single_mode: str = "off"         # "off"（严格复现历史 V100）or "sft_raw_cosine"
+    both_single_backend: str = "configs/moss_single_speaker_router_v2.json"  # 20 维 logistic 分类器 bundle
+    both_single_sft_threshold: float = 0.29  # 双单人分支的同人余弦阈值
     # ---- 分离器 ----
     moss_model: str = "model/artifacts/mossformer2_dasynth_sweep_ep6.pt"  # dasynth 微调分离器权重
     # ---- 输出口径 ----
     id_mode: str = "relative_stem"        # 样本 id 生成方式（竞赛提交格式要求）
     separation_cache: str = "outputs/szy_cache/separation"  # 分离结果 wav 缓存目录
-    batch_writes: int = 1                 # 每批样本后强制写出（checkpoint 粒度）
+    batch_writes: int = 100               # 每累计 N 条新结果写一次盘（checkpoint/ASR 缓存粒度）
+    # False 时只保留进程内 ASR 缓存（供同一条音频的 N-best 复用），
+    # 不读写 asr_cache.json（交付/评测口径：结果只依赖当次运行）
+    asr_cache_persistent: bool = True
 
 
 def load_config(path: str | Path) -> SzyConfig:
@@ -163,6 +205,68 @@ def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.dot(left, right))
 
 
+class AsrCache:
+    """ASR 转写缓存：键 = ``<音频路径>|<解码配置标签>``，值 = 转写结果。
+
+    同一段音频会在多种解码配置下被转写——主解码（ELM 关、beam=3）、
+    唤醒解码（beam=1）、ELM 重解码（ELM 开）——所以键必须带配置标签
+    （如 ``b3|elm0``），只按路径做键会把"别的配置解出来的文本"错当成
+    本配置的结果（静默污染，最难排查的那类 bug）。
+
+    两层用法：
+      - 进程内缓存始终开启：同一次运行里，主解码存下的 N-best 候选可被
+        后处理直接复用，不必对同一音频二次解码；
+      - 落盘持久化由配置控制（asr_cache_persistent）：开启时跨运行复用，
+        调参重跑 ~10x 提速；评测/交付口径下关闭，保证结果只依赖当次运行。
+
+    写盘是批量的（每 batch_writes 条新结果写一次）：缓存 JSON 动辄几千条，
+    每条解码都全量重写一次会把 IO 放大成瓶颈。
+    """
+
+    def __init__(self, cache_path: Path, batch_writes: int = 100, persistent: bool = True):
+        self.cache_path = cache_path
+        self.batch_writes = max(int(batch_writes), 1)
+        self.persistent = bool(persistent)
+        self.dirty_entries = 0
+        self.cache: dict[str, dict] = {}
+        if self.persistent and cache_path.exists():
+            self.load()
+
+    def load(self):
+        """Load cache from disk."""
+        with open(self.cache_path, "r", encoding="utf-8") as f:
+            self.cache = json.load(f)
+
+    def save(self):
+        """Save cache to disk."""
+        if not self.persistent:
+            self.dirty_entries = 0
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.cache_path, "w", encoding="utf-8") as f:
+            json.dump(self.cache, f, ensure_ascii=False, indent=2)
+        self.dirty_entries = 0
+
+    def save_if_needed(self) -> None:
+        """每累计指定数量的新转写结果后写盘，避免每次解码都重写整个 JSON。"""
+        if self.dirty_entries >= self.batch_writes:
+            self.save()
+
+    def flush(self) -> None:
+        """程序正常结束时强制保存最后不足一个批次的缓存。"""
+        if self.dirty_entries:
+            self.save()
+
+    def get(self, path_str: str) -> dict | None:
+        """Get cached result for a path."""
+        return self.cache.get(path_str)
+
+    def put(self, path_str: str, result: dict):
+        """Store result for a path."""
+        self.cache[path_str] = result
+        self.dirty_entries += 1
+
+
 class FusionGate:
     """双前端线性融合门控：预训练 + 分离域微调 ERes2NetV2 的 6 维余弦特征。
 
@@ -175,11 +279,13 @@ class FusionGate:
     一次 ``score`` 调用同时产出三样东西（复用同批 embedding，不重复推理）：
       1. 接受/拒绝判定（融合分 >= 阈值）；
       2. 融合分 score；
-      3. 全部逐通道余弦（供候选选择与音色触发复用）。
+      3. 全部逐通道余弦（供候选选择与双单人短路复用）。
 
     声纹推理（两个大模型各提 5 段波形的 embedding）是全链路最贵的一步，
-    所以设计原则是"一次推理的产物榨干用尽"：门控、候选选择、音色触发
-    共享同一批 embedding，绝不为同一段音频重复提特征。
+    所以设计原则是"一次推理的产物榨干用尽"：两个前端共享同一次 Fbank
+    （prepare_waveforms 只跑一遍，各自前向 embedding_model），门控、
+    候选选择、双单人短路共享同一批 embedding，绝不为同一段音频重复
+    提特征。
     """
 
     def __init__(
@@ -238,8 +344,8 @@ class FusionGate:
     ) -> tuple[bool, float, dict[str, float]]:
         """对五段波形打分，返回 (是否接受, 融合分, 特征明细)。
 
-        command_source_empty=True（分离通道转写为空）时，把原始指令也作为
-        候选一并参与"分离收益"评估，避免空通道污染门控输入。
+        command_source_empty=True（分离通道不可用/指令为单人）时，把原始
+        指令也作为候选一并参与"分离收益"评估，避免空通道污染门控输入。
 
         类型标注的价值：``tuple[bool, float, dict[str, float]]`` 精确描述
         三个槽位各自是什么，读代码的人不用猜，IDE/静态检查工具也能据此
@@ -248,18 +354,20 @@ class FusionGate:
         # 五段波形固定顺序送入两个前端：唤醒锚点、原始唤醒、原始指令、
         # 分离通道 0、分离通道 1
         waves = [anchor_wave, raw_wake_wave, raw_command_wave, command0_wave, command1_wave]
+        # 两套 ERes2NetV2 的声学前端完全相同，只是 embedding_model 权重
+        # 不同。Fbank 只计算一次（prepare_waveforms），两套模型仍串行
+        # 前向，不增加并发激活显存。
+        shared_features = self.pretrained.prepare_waveforms(waves)
         values: dict[str, float] = {}
-        # 两个前端各跑一遍，产出同名的特征集合，用 tag 前缀区分（pre_/ft_）。
-        # 循环代替复制粘贴：前端只换实例、其余逻辑完全一致，
-        # 以后加第三个前端也只需改元组
+        # 两个前端各跑一遍 embedding，产出同名的特征集合，用 tag 前缀
+        # 区分（pre_/ft_）。循环代替复制粘贴：前端只换实例、其余逻辑
+        # 完全一致，以后加第三个前端也只需改元组
         for tag, embedder in (("pre", self.pretrained), ("ft", self.finetuned)):
-            # extract_waveforms 一次性提 5 段波形的 embedding（内部按长度
-            # 分组批量推理），比逐段调用少 4 次模型进出开销
-            e_anchor, e_raw_wake, e_raw_cmd, e_cmd0, e_cmd1 = embedder.extract_waveforms(waves)
+            e_anchor, e_raw_wake, e_raw_cmd, e_cmd0, e_cmd1 = embedder.extract_features(shared_features)
             # 分离收益候选：两条分离通道各自与唤醒锚点的余弦
             candidates = [_cosine(e_anchor, e_cmd0), _cosine(e_anchor, e_cmd1)]
             if command_source_empty:
-                # 分离通道转写为空说明分离没产出可用内容；把原始指令也拉
+                # 分离通道不可用说明分离没产出可用内容；把原始指令也拉
                 # 进候选竞争，防止"空通道假赢"把门控输入带偏
                 candidates.append(_cosine(e_anchor, e_raw_cmd))
             values[f"{tag}_raw"] = _cosine(e_raw_wake, e_raw_cmd)
@@ -283,9 +391,20 @@ class FusionGate:
         score = float(x @ self.weight + self.bias)
         return score >= self.threshold, score, values
 
+    def finetuned_raw_cosine(self, wake_wave: np.ndarray, command_wave: np.ndarray) -> float:
+        """只用微调 ERes2NetV2 计算原始唤醒与原始命令的余弦。
+
+        双单人短路专用：两段音频都是单人时，一次 raw/raw 余弦足以判
+        "是不是同一个人"，不必走 6 维门控（那套特征为混合/分离场景设计）。
+        """
+        wake_embedding, command_embedding = self.finetuned.extract_waveforms(
+            [wake_wave, command_wave]
+        )
+        return _cosine(wake_embedding, command_embedding)
+
 
 class SzyRunner:
-    """逐样本管线执行器：门控 → 音色触发 → 候选选择，异常一律回退原始转写。
+    """逐样本管线执行器：声学路由 → 门控 → 选择 → 后处理，异常一律回退原始转写。
 
     一个 runner 实例绑定一份配置与一个输出目录，对每个 :class:`Sample`
     调用一次 :meth:`process`，返回可序列化的结果字典（detail.json 一行）。
@@ -306,9 +425,18 @@ class SzyRunner:
         self.cache_dir = Path(config.separation_cache)
         if not self.cache_dir.is_absolute():
             self.cache_dir = (Path.cwd() / self.cache_dir).resolve()
-        # 门控最先构造：它决定大部分样本的去留（拒绝即止步，不需要分离），
-        # 是链路的第一道也是最重要的闸。声纹前端设备默认跟随 device，
-        # sv_device 单独指定时可分卡部署
+
+        # ASR 转写缓存与分离缓存同目录的父级（asr_cache.json）；进程内
+        # 缓存始终开启，是否跨进程落盘由配置控制
+        asr_cache_path = self.cache_dir.parent / "asr_cache.json"
+        self.asr_cache = AsrCache(
+            asr_cache_path, config.batch_writes, config.asr_cache_persistent,
+        )
+
+        # 门控最先构造：它决定大部分样本的去留（拒绝即止步），是链路的
+        # 第一道也是最重要的闸。声纹前端设备默认跟随 device，sv_device
+        # 单独指定时可分卡部署
+        print("[初始化] 加载 FusionGate (预训练 + 微调 ERes2NetV2)...", flush=True)
         self.gate = FusionGate(
             config.sv_model,
             config.finetuned_sv_ckpt,
@@ -317,17 +445,39 @@ class SzyRunner:
             config.sv_device or config.device,
             config.model_root,
         )
+        print("[初始化] ✓ FusionGate 加载完成", flush=True)
+
+        # 声学单双人路由器（纯波形特征，不花 ASR）：生产配置显式开启；
+        # "off" 时严格复现历史 V100 流程
+        if config.both_single_mode not in {"off", "sft_raw_cosine"}:
+            raise ValueError("both_single_mode must be off or sft_raw_cosine")
+        self.both_single_router = (
+            BothSingleRouter(config.both_single_backend, config.both_single_sft_threshold)
+            if config.both_single_mode == "sft_raw_cosine" else None
+        )
+        if self.both_single_router is not None:
+            print(
+                "[初始化] ✓ 双单人独立路由已启用 "
+                f"(single_p>={self.both_single_router.single_threshold:.6f}, "
+                f"SFT cosine>={self.both_single_router.same_speaker_threshold:.3f})",
+                flush=True,
+            )
+
         # 分离器延迟导入：szy.separator 依赖 torch + vendor 模型定义，
         # 延迟到构造时再 import，保证 --help / 单测在无 torch 环境可用。
         # 注意 import 位置的语义：顶层 import 在"模块被 import"时执行，
         # 函数体内 import 在"函数被调用"时执行——这里推迟的是 torch 依赖
+        print("[初始化] 加载 MossFormer2 分离器...", flush=True)
         from szy.separator import MossFormer2Separator
 
         self.separator = MossFormer2Separator(config.moss_model, config.device)
+        print("[初始化] ✓ MossFormer2 分离器加载完成", flush=True)
+
         # ASR 后端二选一："aed" 生产基线（快、稳）；"llm" 用 Qwen2-7B 解码
         # （上限更高但慢得多，且需要更多显存）。self.asr 标注为 Any：
         # 两种识别器不是同一类型，但都暴露 transcribe_many 与 _model.transcribe
         # 接口（鸭子类型），管线按统一接口使用，类型标注上放宽容许两者
+        print("[初始化] 加载 FireRed ASR...", flush=True)
         if config.firered_asr_type == "llm":
             self.asr: Any = FireRedLLMRecognizer(
                 config.firered_model,
@@ -336,13 +486,249 @@ class SzyRunner:
                 config.firered_vendor,
                 batch_size=config.firered_llm_batch_size,
             )
+            self.elm_asr = None
         else:
+            # 唤醒与命令通道共用一份 AED 权重。唤醒侧原本是独立的
+            # FireRedRecognizer(beam=1, 无 ELM)，等价于在共享实例上临时把
+            # beam 压到 1 且把 elm_weight 置 0（见 _transcribe_wake）。
+            # 省掉整份 AED 权重的重复驻留（峰值 4818 MiB vs ~7.4 GB），
+            # 也消除两份模型同时在显存里带来的数值/内核选择抖动。
             self.asr = FireRedRecognizer(
                 config.firered_model,
                 config.device,
                 config.firered_repo,
                 config.firered_vendor,
+                beam_size=config.firered_beam_size,
+                nbest=config.firered_beam_size,
+                elm_dir=config.firered_elm_dir,
+                elm_weight=config.firered_elm_weight,
             )
+            # ELM 与主解码共用同一份 AED 权重。主解码一律用
+            # temporary_elm_weight(0.0) 关闭 ELM，ELM 只作为选择后的
+            # 重解码通道，因此不会污染 confidence，也就不会干扰路由。
+            self.elm_asr = self.asr if config.firered_elm_dir else None
+            print("[初始化] ✓ FireRed ASR 加载完成 (唤醒/命令共享同一份 AED 权重)", flush=True)
+            print("[初始化]   - Wake ASR: beam=1, ELM off (临时切换)", flush=True)
+            print(f"[初始化]   - Command ASR: beam={config.firered_beam_size} + ELM", flush=True)
+            print(f"[初始化]   - N-best mode: {config.firered_nbest_mode}", flush=True)
+            if config.firered_elm_dir:
+                print(f"[初始化]   - ELM: enabled (weight={config.firered_elm_weight})", flush=True)
+            else:
+                print("[初始化]   - ELM: disabled", flush=True)
+
+    # ------------------------------------------------------------------
+    # 转写层：统一走 ASR 缓存，按解码配置打标签
+    # ------------------------------------------------------------------
+
+    def _transcribe_with_asr(
+        self, paths: list[Path], asr_instance, *, cache_tag: str = "default",
+    ) -> list[dict[str, Any]]:
+        """Transcribe paths using a specific ASR instance.
+
+        ``cache_tag`` identifies the decode configuration (beam + ELM weight).
+        The same wav is now decoded under more than one configuration — the
+        primary pass with ELM off and the post-selection pass with ELM on — so
+        keying the cache on the path alone would silently return a transcript
+        produced by the wrong configuration.
+
+        （中文）统一转写入口：先查缓存（命中直接返回），未命中才真实
+        解码并把结果（含 N-best 候选）写进缓存。返回与输入顺序一一对应
+        的 [{"text", "confidence", "nbest"?}] 列表。
+        """
+        if not paths:
+            return []
+
+        # 先按缓存键把输入分成"命中"与"未命中"两组，记录下标以便最后
+        # 按原顺序回填
+        results = []
+        uncached_paths = []
+        uncached_indices = []
+
+        for idx, path in enumerate(paths):
+            path_str = str(path)
+            cached = self.asr_cache.get(f"{path_str}|{cache_tag}")
+            if cached is not None:
+                results.append((idx, cached))
+            else:
+                uncached_paths.append(path)
+                uncached_indices.append(idx)
+
+        # 全部命中：直接按原顺序返回（不再碰模型）
+        if not uncached_paths:
+            return [r for _, r in sorted(results, key=lambda x: x[0])]
+
+        # 未命中的批量送解码；uttid 用下标生成，行序按 uttid 重排回输入序
+        utterance_ids = [f"szy_{index}" for index in range(len(uncached_paths))]
+        with suppress_model_output():
+            rows = asr_instance._model.transcribe(utterance_ids, [str(path) for path in uncached_paths])
+        mapped = {str(row.get("uttid")): row for row in rows}
+        if len(mapped) != len(uncached_paths):
+            # 数量对不上说明底层漏返回/重复返回——宁可报错也不要静默
+            # 输出错位结果（错位会把 A 的文本安到 B 头上，CER 全错）
+            raise RuntimeError("FireRed returned an unexpected result count")
+
+        for idx, identifier in enumerate(utterance_ids):
+            row = mapped[identifier]
+            confidence = row.get("confidence")
+            try:
+                confidence = float(confidence)
+                if not np.isfinite(confidence):
+                    confidence = 1.0
+            except (TypeError, ValueError):
+                confidence = 1.0
+
+            result = {
+                "text": normalize_transcript(str(row.get("text", ""))),
+                "confidence": confidence,
+            }
+            # FireRed 在主 beam=3 解码时已经生成了 N-best。把它与 top-1
+            # 一起保存，最终通道选定后即可直接做 MBR，无需对同一音频
+            # 再次解码。
+            normalized_nbest: list[dict[str, Any]] = []
+            for hypothesis in row.get("nbest", []) or []:
+                if not isinstance(hypothesis, dict):
+                    continue
+                hypothesis_confidence = hypothesis.get("confidence", 0.0)
+                try:
+                    hypothesis_confidence = float(hypothesis_confidence)
+                    if not np.isfinite(hypothesis_confidence):
+                        hypothesis_confidence = 0.0
+                except (TypeError, ValueError):
+                    hypothesis_confidence = 0.0
+                normalized_nbest.append({
+                    "text": normalize_transcript(str(hypothesis.get("text", ""))),
+                    "confidence": hypothesis_confidence,
+                })
+            if normalized_nbest:
+                result["nbest"] = normalized_nbest
+
+            path_str = str(uncached_paths[idx])
+            self.asr_cache.put(f"{path_str}|{cache_tag}", result)
+            results.append((uncached_indices[idx], result))
+
+        # 只在累计达到 batch_writes 后写盘；最后一个不足批次由
+        # flush_caches 强制刷新
+        self.asr_cache.save_if_needed()
+
+        return [r for _, r in sorted(results, key=lambda x: x[0])]
+
+    def _primary_transcribe(
+        self, paths: list[Path], *, beam_size: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Primary AED decode with ELM disabled.
+
+        Every decision-carrying transcript (wake anchors, separated command
+        channels, the raw command) comes from here.  ELM is held at weight 0
+        so ``confidence`` keeps the scale the routing was calibrated on;
+        ELM is applied later, once, to the selected channel only.
+
+        （中文）主解码：所有"承载决策"的转写都从这里出。LLM 后端没有
+        temporary_elm_weight（它本就不带 ELM），hasattr 探测后直接解码。
+        """
+        beam = self.config.firered_beam_size if beam_size is None else beam_size
+        tag = f"b{beam}|elm0"
+        if not hasattr(self.asr, "temporary_elm_weight"):
+            return self._transcribe_with_asr(paths, self.asr, cache_tag=tag)
+        with self.asr.temporary_elm_weight(0.0):
+            if beam_size is None:
+                return self._transcribe_with_asr(paths, self.asr, cache_tag=tag)
+            with self.asr.temporary_beam_size(beam_size):
+                return self._transcribe_with_asr(paths, self.asr, cache_tag=tag)
+
+    def _transcribe(self, paths: list[Path]) -> list[dict[str, Any]]:
+        """Transcribe the separated command channels (primary beam, no ELM)."""
+        return self._primary_transcribe(paths)
+
+    def _transcribe_wake(self, paths: list[Path]) -> list[dict[str, Any]]:
+        """Transcribe wake channels at beam=1 with no ELM (stable anchors).
+
+        （中文）唤醒通道只求"稳"：锚点选择需要的是确定性而非探索性，
+        beam=1 贪心解码结果最稳定；与命令通道共享同一份 AED 权重，
+        靠 temporary_beam_size(1) 临时压束宽。
+        """
+        return self._primary_transcribe(paths, beam_size=1)
+
+    def _elm_redecode(self, audio: Path, baseline_text: str) -> tuple[str, bool, str | None]:
+        """Re-decode the selected channel with ELM enabled.
+
+        Runs after routing, so it can no longer alter the gate or the switch
+        decision.  An empty baseline is left untouched: a language model must
+        not invent a transcript where the acoustic model produced none.
+
+        （中文）ELM 重解码：路由已定之后对最终通道跑一次。空基线不重解
+        ——语言模型不许在声学模型"什么都没听到"的地方凭空造出文本。
+        """
+        if self.elm_asr is None or not baseline_text:
+            return baseline_text, False, None
+        beam = self.config.firered_elm_beam_size
+        weight = self.config.firered_elm_weight
+        tag = f"b{beam}|elm{weight:g}"
+        with self.elm_asr.temporary_elm_weight(weight):
+            with self.elm_asr.temporary_beam_size(beam):
+                rows = self._transcribe_with_asr([audio], self.elm_asr, cache_tag=tag)
+        elm_text = rows[0]["text"]
+        if not elm_text:
+            return baseline_text, False, elm_text
+        return elm_text, True, elm_text
+
+    def _nbest_redecode(
+        self, audio: Path, baseline_text: str, baseline_confidence: float,
+    ) -> dict[str, Any]:
+        """Conservative MBR rerank of the selected channel.
+
+        （中文）优先复用主解码已经产生并缓存的 N-best 候选（零额外
+        推理）；兼容旧缓存——其中没有 nbest 字段时才执行历史二次解码。
+        """
+        disabled = {"text": baseline_text, "nbest_applied": False, "nbest_reason": "nbest_disabled"}
+        if self.config.firered_nbest_mode == "off" or not baseline_text:
+            return disabled
+        primary_tag = f"b{self.config.firered_beam_size}|elm0"
+        cached = self.asr_cache.get(f"{str(audio)}|{primary_tag}")
+        hypotheses = list(cached.get("nbest", [])) if cached is not None else []
+        if not hypotheses:
+            try:
+                with self.asr.temporary_elm_weight(0.0):
+                    hypotheses = self.asr.transcribe_many_nbest([audio])[0]
+            except Exception as error:
+                return {**disabled, "nbest_reason": f"nbest_error_keep_baseline:{type(error).__name__}"}
+        if not hypotheses:
+            return {**disabled, "nbest_reason": "no_hypotheses"}
+        baseline = {"text": baseline_text, "confidence": baseline_confidence}
+        if len(hypotheses) == 1:
+            return {**disabled, "nbest_reason": "single_hypothesis"}
+        return conservative_mbr_rerank(
+            baseline=baseline,
+            nbest=[h for h in hypotheses if h["text"] != baseline_text],
+            min_confidence_gain=self.config.firered_nbest_min_confidence_gain,
+            min_mbr_risk_reduction=self.config.firered_nbest_min_mbr_risk_reduction,
+        )
+
+    def _postprocess_text(
+        self, audio: Path, baseline_text: str, baseline_confidence: float,
+    ) -> dict[str, Any]:
+        """N-best rerank then ELM, applied to whichever channel routing chose.
+
+        Previously N-best only ever ran on the raw command, so it was
+        discarded whenever the switch rule picked a separated channel.
+
+        （中文）选择后处理两件套：先 MBR 重排、再 ELM 重解码，只作用在
+        路由选中的那一路。它们不再可能反向影响门控/路由——这是 Phase 2
+        的核心不变量（详见 docs/OPTIMIZATION_SUMMARY.md 附录）。
+        """
+        nbest = self._nbest_redecode(audio, baseline_text, baseline_confidence)
+        final_text, elm_applied, elm_text = self._elm_redecode(audio, nbest["text"])
+        return {
+            "content": final_text,
+            "baseline_content": baseline_text,
+            "elm_applied": elm_applied,
+            "elm_content": elm_text,
+            "nbest_applied": nbest["text"] != baseline_text,
+            "nbest_reason": nbest.get("nbest_reason", "unknown"),
+        }
+
+    def flush_caches(self) -> None:
+        """保存最后不足 batch_writes 条的 ASR 缓存。"""
+        self.asr_cache.flush()
 
     def _paths_for(self, sample: Sample) -> tuple[tuple[Path, Path], tuple[Path, Path]]:
         """转发给 helpers.separation_paths_for 计算 (唤醒分离路径对, 指令分离路径对)。
@@ -357,11 +743,14 @@ class SzyRunner:
         """处理一个样本，返回 detail.json 的一行（所有字段都可 JSON 序列化）。
 
         执行顺序（每个阶段都可能提前返回）：
-          1. 算分离缓存路径并批量转写唤醒/指令共 4 段音频；
-          2. 选唤醒锚点（哪段唤醒音频最像目标人）；
-          3. 融合门控打分；拒绝则带着 route=fusion_reject 直接返回；
-          4. 转写原始指令，算字速/关键词/分离收益，判定是否切分离通道；
-          5. 不切换则用原始转写返回；切换则用 ft 直接余弦选 ms0/ms1。
+          1. 分离唤醒/指令音频（或命中缓存）并读入 6 段波形；
+          2. 声学单双人判定（纯波形，不花 ASR）；双单人进入独立短路：
+             微调声纹 raw 余弦判同人，接受则只解码原始指令；
+          3. 唤醒两通道 beam=1 转写 → 拼音相似度选锚点；
+          4. 融合门控打分；拒绝则带 route=fusion_reject 直接返回；
+          5. 单人指令：只解码原始指令；双人指令：ft 余弦选路后只解码
+             选中的分离通道（首选为空才补解码另一路）；
+          6. 选中通道统一做 N-best 重排 + ELM 重解码后处理。
 
         贯穿全程的两个兜底原则：
           - 结果字典在 try 之前就预填好全部字段的默认值——任何环节抛异常，
@@ -382,6 +771,7 @@ class SzyRunner:
             "id": item_id,
             "content": "",
             "label": sample.label,
+            "wake_text": sample.wake_text,
             # sample_type：有标注=正样本（必须转写对），无标注=负样本（应拒绝）
             "sample_type": "positive" if sample.label is not None else "negative",
             "sv_score": "",
@@ -398,41 +788,100 @@ class SzyRunner:
             "chars_per_sec": None,
             "command_keyword_score": None,
             "error": None,
+            "both_single": False,
+            "both_single_wake_probability": None,
+            "both_single_command_probability": None,
+            "both_single_sft_raw_cosine": None,
+            "command_is_single": None,
+            "separated_command_source_empty": None,
         }
         try:
             # _paths_for 内部会真实触发分离（或命中缓存直接返回旧路径）
             (wake_paths, command_paths) = self._paths_for(sample)
-            # 一次批量转写 4 段音频：唤醒两通道 + 指令两通道。批量调用
-            # 摊薄每次调用的固定开销（模型状态准备、结果组装等）
-            wake0, wake1, command0, command1 = transcribe_firered_rows(
-                self.asr,
-                [wake_paths[0], wake_paths[1], command_paths[0], command_paths[1]],
-                "szy",
+            # 先从波形判断唤醒/指令是否均为单人。该判断不依赖 ASR 文本——
+            # "便宜特征先行"：20 维声学统计量的代价远低于一次 ASR 解码
+            raw_wake_wave = read_wav(sample.wake_audio)
+            raw_command_wave = read_wav(sample.command_audio)
+            wake0_wave, wake1_wave = read_wav(wake_paths[0]), read_wav(wake_paths[1])
+            command0_wave, command1_wave = read_wav(command_paths[0]), read_wav(command_paths[1])
+            both_single = (
+                self.both_single_router.decide_both(
+                    raw_wake_wave, wake0_wave, wake1_wave,
+                    raw_command_wave, command0_wave, command1_wave,
+                )
+                if self.both_single_router is not None else None
             )
-            # 门控唤醒锚点：生产同一规则（一路为空回退原始 kws）。
-            # 锚点的作用：唤醒音频里可能同时录进了目标人和家人/噪声，
-            # 分离成两路后用文本编辑距离找出"念了唤醒词的那一路"作为
-            # 目标人嗓音的代表，后续余弦比较都对着它做
-            # 注：曾验证"非空通道直选"（PR/CER 更优），但在计分公式 (1−CER+RR)/2 下
-            # RR 权重高，raw 回退版公式分更高（0.7977 vs 0.7939），故保持 raw 回退。
-            gate_anchor = select_wake_anchor(sample.wake_text, wake0["text"], wake1["text"])
-            # 回退时锚点用原始唤醒音频；否则用选中的分离通道音频。
-            # gate_anchor 是 WakeAnchorDecision（frozen dataclass，
-            # 字段见 midea_qiji.moss_candidate），不可变、只读决策结果
-            anchor_path = sample.wake_audio if gate_anchor.raw_wake_fallback else wake_paths[gate_anchor.selected_source]
-            # 任一路分离转写为空 → 分离没产出可用内容，门控会把原始指令
-            # 纳入候选（见 FusionGate.score 的 command_source_empty 分支）
-            command_source_empty = not command0["text"] or not command1["text"]
+            if both_single is not None:
+                result.update({
+                    "both_single": bool(both_single.is_both_single),
+                    "both_single_wake_probability": f"{both_single.wake.probability:.6f}",
+                    "both_single_command_probability": f"{both_single.command.probability:.6f}",
+                    "command_is_single": bool(both_single.command.is_single),
+                })
 
-            # 融合门控打分：五段波形全部读进内存。read_wav 统一读到
-            # 16k 单声道 float32（每秒约 64KB，几秒语音完全放得下）
+            # 双单人是独立的短路分支：不再使用六维门控或分离通道文本。
+            # 单人录音里分离通道没有额外信息，一次 raw/raw 余弦判同人即可
+            if both_single is not None and both_single.is_both_single:
+                score = self.gate.finetuned_raw_cosine(raw_wake_wave, raw_command_wave)
+                accepted = self.both_single_router.accept_same_speaker(score)
+                result.update({
+                    "sv_score": f"{score:.6f}",
+                    "sv_accept_threshold": f"{self.both_single_router.same_speaker_threshold:.6f}",
+                    "accepted": bool(accepted),
+                    "both_single_sft_raw_cosine": f"{score:.6f}",
+                    "route": "both_single_raw" if accepted else "both_single_reject",
+                    "selected_candidate": "orig" if accepted else "",
+                    "selection_reason": "both_single_sft_raw_cosine",
+                    "switch_triggered": False,
+                })
+                if not accepted:
+                    result["item_duration"] = f"{time.perf_counter() - started:.6f}"
+                    return result
+                raw_command = self._primary_transcribe([sample.command_audio])[0]
+                result.update({
+                    **self._postprocess_text(
+                        sample.command_audio, raw_command["text"], raw_command["confidence"],
+                    ),
+                    "raw_confidence": f"{raw_command['confidence']:.6f}",
+                    "raw_text": raw_command["text"],
+                })
+                result["item_duration"] = f"{time.perf_counter() - started:.6f}"
+                return result
+
+            # ---- 常规分支：拼音锚点 + 融合门控 ----
+            # Wake channels: beam=1 (stable anchor selection)
+            wake0, wake1 = self._transcribe_wake([wake_paths[0], wake_paths[1]])
+            # 指令路由完全由声学单双人分类器决定（单人指令的分离通道里
+            # 没有额外信息，直接解码原始音频省一半命令 ASR）。
+            command_is_single = bool(
+                both_single is not None and both_single.command.is_single
+            )
+            # 命令 ASR 延迟到门控接受、余弦选源完成之后。此处不解码
+            # Raw、cmd0 或 cmd1，因此被拒识的样本不会浪费任何命令 ASR。
+            command0: dict[str, Any] | None = None
+            command1: dict[str, Any] | None = None
+            # 门控唤醒锚点：生产同一规则（一路为空回退原始 kws；拼音
+            # 相似度打平也回退原始 kws——规则见 midea_qiji.moss_candidate）
+            # 注：曾验证"非空通道直选"（PR/CER 更优），但在计分公式
+            # (1−CER+RR)/2 下 RR 权重高，raw 回退版公式分更高
+            #（0.7977 vs 0.7939），故保持 raw 回退。
+            gate_anchor = select_wake_anchor(sample.wake_text, wake0["text"], wake1["text"])
+            # 只有单人指令才允许门控把 Raw CMD 纳入候选；双人指令保持恒切
+            gate_use_raw_command = command_is_single
+
+            anchor_wave = (
+                raw_wake_wave if gate_anchor.raw_wake_fallback
+                else (wake0_wave, wake1_wave)[gate_anchor.selected_source]
+            )
+            # 融合门控打分：五段波形一次打分，产出接受判定 + 融合分 +
+            # 全部逐通道余弦（候选选择直接复用，不重复提 embedding）
             accepted, score, gate_values = self.gate.score(
-                read_wav(anchor_path),
-                read_wav(sample.wake_audio),
-                read_wav(sample.command_audio),
-                read_wav(command_paths[0]),
-                read_wav(command_paths[1]),
-                command_source_empty,
+                anchor_wave,
+                raw_wake_wave,
+                raw_command_wave,
+                command0_wave,
+                command1_wave,
+                gate_use_raw_command,
             )
             # 把门控产物写进结果行。数值统一 f"{:.6f}" 格式化成字符串：
             # JSON 里浮点会带长尾巴且各平台打印不一致，字符串格式由我们
@@ -442,99 +891,98 @@ class SzyRunner:
                 "accepted": bool(accepted),
                 "gate_features": {k: f"{gate_values[k]:.6f}" for k in FUSION_FEATURE_KEYS},
                 "wake_selected_source": int(gate_anchor.selected_source),
+                "wake_source0_text": wake0["text"],
+                "wake_source1_text": wake1["text"],
                 "wake_raw_fallback": bool(gate_anchor.raw_wake_fallback),
-                "command_source_empty": bool(command_source_empty),
+                "wake_text_tie": bool(gate_anchor.text_tie),
+                "wake_contrast_source": int(gate_anchor.contrast_source),
+                "wake_reason": gate_anchor.reason,
+                "wake_source0_sim": f"{gate_anchor.source0_sim:.6f}" if gate_anchor.source0_sim is not None else None,
+                "wake_source1_sim": f"{gate_anchor.source1_sim:.6f}" if gate_anchor.source1_sim is not None else None,
+                # ASR 尚未执行，分离源是否为空要在双人指令分支解码后才能确定。
+                "command_source_empty": None,
+                "command_is_single": bool(command_is_single),
+                "separated_command_source_empty": None,
             })
             if not accepted:
                 # 门控拒绝：不跑指令 ASR、不做切换，直接带默认空转写返回。
                 # 这是全链路最大的计算量节省点——负样本与明显不含目标的
-                # 样本在此止步，后面的分离/转写/打分全部跳过
+                # 样本在此止步，后面的转写/后处理全部跳过
                 result["item_duration"] = f"{time.perf_counter() - started:.6f}"
                 return result
 
-            # ---- 接受分支：raw ASR + 音色触发 ----
-            # 对"原始指令音频"（未分离的混合）转写：这是默认输出口径，
-            # 只有音色触发成功才会被分离通道转写替换
-            raw_command = transcribe_firered_rows(self.asr, [sample.command_audio], "szy")[0]
-            # 字速 = 归一化转写字数 / 音频秒数；关键词分 = 命中 CMD_KW 次数。
-            # 二者刻画"转写像不像一条真实指令"（噪声转写往往又短又怪），
-            # 与置信度一起进入音色触发规则
-            chars_per_sec, command_keyword_score = command_features(
-                raw_command["text"], duration_seconds(sample.command_audio)
-            )
-            # sv_diff：分离后目标嗓音浓度 − 原始混合中的浓度（复用门控已算余弦）。
-            # 若分离真的让目标人更突出，sv_diff 显著为正；为负说明分离
-            # 反而把目标人抹掉了，此时绝不该切换到分离通道
-            sv_diff = max(gate_values["ft_cos_cmd0"], gate_values["ft_cos_cmd1"]) \
-                - gate_values["ft_rawcmd"]
-            # 音色触发三要素（规则本体在 midea_qiji.moss_candidate）：
-            # 转写置信度、指令像度、分离收益，三者组合决定是否把输出
-            # 从原始转写换成分离通道转写
-            switch = should_switch_command_timbre(
-                confidence=raw_command["confidence"],
-                command_keyword_score=command_keyword_score,
-                sv_diff=sv_diff,
-            )
-            result.update({
-                "content": raw_command["text"],
-                # route 记录"这条样本实际走了哪条路"：切换成功记
-                # moss_candidate，未触发记 raw——汇总里的路由分布全靠它
-                "route": "moss_candidate" if switch else "raw",
-                "selected_candidate": "orig",
-                "selection_reason": "candidate_pending" if switch else "timbre_switch_rule_not_triggered",
-                "switch_triggered": bool(switch),
-                "raw_confidence": f"{raw_command['confidence']:.6f}",
-                "chars_per_sec": f"{chars_per_sec:.6f}",
-                "command_keyword_score": f"{command_keyword_score:.6f}",
-                "sv_diff": f"{sv_diff:.6f}",
-                # 供触发阈值离线重扫（与 switch 分支重复写入，值一致）。
-                # 这些"过程量"不直接进提交物，但 detail.json 里有了它们，
-                # 事后可以用同一份结果重跑不同阈值、不必重新推理——
-                # 推理很贵，过程数据便宜，这是实验系统的通用做法
-                "raw_text": raw_command["text"],
-                "command_source0_text": command0["text"],
-                "command_source1_text": command1["text"],
-                "ft_cos_ms0": f"{gate_values['ft_cos_cmd0']:.6f}",
-                "ft_cos_ms1": f"{gate_values['ft_cos_cmd1']:.6f}",
-            })
-            if not switch:
-                # 音色规则未触发：用原始转写收尾（最常见路径之一）
+            if command_is_single:
+                # 单人指令：门控接受后只解码一次 Raw CMD。
+                raw_command = self._primary_transcribe([sample.command_audio])[0]
+                result.update({
+                    "content": raw_command["text"],
+                    "route": "raw_command_single",
+                    "selected_candidate": "orig",
+                    "selection_reason": "acoustic_command_single",
+                    "switch_triggered": False,
+                    "switch_mode": "acoustic_single_double",
+                    "raw_confidence": f"{raw_command['confidence']:.6f}",
+                    "raw_text": raw_command["text"],
+                    "command_source0_text": "",
+                    "command_source1_text": "",
+                    "ft_cos_ms0": f"{gate_values['ft_cos_cmd0']:.6f}",
+                    "ft_cos_ms1": f"{gate_values['ft_cos_cmd1']:.6f}",
+                })
+                result.update(self._postprocess_text(
+                    sample.command_audio, raw_command["text"], raw_command["confidence"],
+                ))
                 result["item_duration"] = f"{time.perf_counter() - started:.6f}"
                 return result
 
-            # 候选选择：ft 直接余弦（与门控同一打分原理，复用门控已算的逐通道余弦）
-            # 实测与历史 eres+cam 差分打平，但逻辑更一致，且避开对比通道污染。
+            # 双人指令恒切：先按 FT 余弦选源，只对选中通道执行一次 ASR。
+            # 仅当首选通道文本为空时，才付出第二次 ASR 的开销并改选另一
+            # 通道；绝不解码 Raw CMD（它的内容对双人指令没有参考价值）。
             anchor = gate_anchor
-            selected = "orig"
-            reason = "candidate_pending"
-            if command_source_empty:
-                # 分离通道没转写出任何内容：即使触发了切换也无可换，
-                # 保持原始转写（不切换内容，但记录原因供事后分析）
-                reason = "command_source_empty"
+            preferred_index = (
+                0 if gate_values["ft_cos_cmd0"] >= gate_values["ft_cos_cmd1"] else 1
+            )
+            selected_index = preferred_index
+            selected_result = self._transcribe([command_paths[selected_index]])[0]
+            if selected_index == 0:
+                command0 = selected_result
             else:
-                # 两条分离通道里，与唤醒锚点余弦更大的那路判为目标人通道。
-                # >= 保证平局时选 ms0（与历史行为一致）
-                selected = "ms0" if gate_values["ft_cos_cmd0"] >= gate_values["ft_cos_cmd1"] else "ms1"
-                reason = "ft_direct_cosine"
-            # 三选一映射表：字典比 if/elif 链更直观，候选名 → 转写文本
-            text_by_candidate = {
-                "orig": raw_command["text"],
-                "ms0": command0["text"],
-                "ms1": command1["text"],
-            }
+                command1 = selected_result
+            reason = "ft_direct_cosine_lazy_asr"
+
+            if not selected_result["text"]:
+                # 首选分离源识别为空时，才补充解码另一通道。
+                selected_index = 1 - preferred_index
+                selected_result = self._transcribe([command_paths[selected_index]])[0]
+                if selected_index == 0:
+                    command0 = selected_result
+                else:
+                    command1 = selected_result
+                reason = "preferred_empty_fallback_other_separated"
+
+            selected = f"ms{selected_index}"
+            selected_audio = command_paths[selected_index]
+            selected_confidence = selected_result["confidence"]
+            selected_text = selected_result["text"]
+            final_source_empty = not bool(selected_text)
             result.update({
-                # selected 为 "orig" 时直接用原始转写；否则取对应分离通道文本
-                "content": text_by_candidate[selected] if selected != "orig" else raw_command["text"],
+                # 路由已定：N-best 重排 + ELM 只作用在选中的那一路上
+                **self._postprocess_text(
+                    selected_audio, selected_text, selected_confidence,
+                ),
                 "selected_candidate": selected,
                 "selection_reason": reason,
-                # 唤醒锚点的过程量一并落盘（对比通道、文本平局标志、
-                # 各通道转写文本），供离线分析锚点选择质量
+                "route": "moss_candidate",
+                "switch_triggered": True,
+                "switch_mode": "acoustic_single_double",
                 "wake_contrast_source": int(anchor.contrast_source),
                 "wake_text_tie": bool(anchor.text_tie),
                 "wake_source0_text": wake0["text"],
                 "wake_source1_text": wake1["text"],
-                "command_source0_text": command0["text"],
-                "command_source1_text": command1["text"],
+                # 未执行 ASR 的通道保留 None，便于确认延迟解码确实生效。
+                "command_source0_text": command0["text"] if command0 is not None else None,
+                "command_source1_text": command1["text"] if command1 is not None else None,
+                "command_source_empty": final_source_empty,
+                "separated_command_source_empty": final_source_empty,
                 "ft_cos_ms0": f"{gate_values['ft_cos_cmd0']:.6f}",
                 "ft_cos_ms1": f"{gate_values['ft_cos_cmd1']:.6f}",
             })

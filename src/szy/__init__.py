@@ -9,14 +9,15 @@
 目录分工（依赖只能向下：scripts/tests → szy → midea_qiji → third_party）：
 
   - ``cli.py``            命令行入口（python -m szy.cli）
-  - ``pipeline.py``       管线引擎：SzyConfig / FusionGate / SzyRunner
+  - ``pipeline.py``       管线引擎：SzyConfig / AsrCache / FusionGate / SzyRunner
+  - ``single_speaker.py`` V2 单人判别器与"双单人"原始音频余弦路由
   - ``separator.py``      dasynth 微调 MossFormer2 torch 分离器（音频前端）
   - ``metrics.py``        分离质量指标（SI-SDR / SI-SNR / PIT 损失）
   - ``train.py``          dasynth 域适配微调训练
   - ``diag.py``           分离质量诊断（按腐蚀类型分组的 SI-SDR 水位）
   - ``sanity_check.py``   torch 权重与历史缓存的对照验证
   - ``helpers.py``        共享工具（哈希 / 音频读取 / FireRed 转写 / 缓存路径）
-  - ``reporting.py``      评测汇总（CER/PR/RR）与提交物写出
+  - ``reporting.py``      评测汇总（CER/PR/RR）、提交物写出与人类可读报告
 
 "依赖只能向下"是分层原则：szy 只允许 import 它下层的包——midea_qiji
 是自研算法内核（声纹前端、识别器、样本数据模型），third_party 是外部

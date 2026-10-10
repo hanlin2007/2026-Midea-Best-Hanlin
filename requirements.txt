@@ -11,6 +11,7 @@ modelscope>=1.17.0              # ModelScope 模型仓库（ERes2NetV2 声纹基
 numpy>=1.26                     # 波形数组 / 门控特征运算
 soundfile>=0.12                 # WAV 读取与写出（分离缓存落盘）
 tqdm>=4.66                      # 进度条
+pypinyin>=0.50                  # 拼音音素相似度（唤醒锚点选择，midea_qiji.phoneme）
 qwen-asr>=0.0.6                 # baseline 路线（midea_qiji.infer）的 Qwen3-ASR 后端
 
 # ---- FireRed ASR 运行时依赖 ----
