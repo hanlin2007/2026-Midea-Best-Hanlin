@@ -36,7 +36,7 @@ class HelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "asset.bin"
             # 构造一个跨越多次 1MB 读循环的测试文件。
-            path.write_bytes(b"midea_qiji" * 1000)
+            path.write_bytes(b"target-speaker" * 1000)
             self.assertEqual(sha256_file(path), hashlib.sha256(path.read_bytes()).hexdigest())
 
     def test_read_mono_16k_rejects_wrong_rate_and_accepts_stereo(self) -> None:

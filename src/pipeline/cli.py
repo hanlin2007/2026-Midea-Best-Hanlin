@@ -1,4 +1,4 @@
-"""SZY 系统命令行入口（`python -m pipeline.cli`）。
+"""目标说话人语音指令识别系统：命令行入口（`python -m pipeline.cli`）。
 
 职责单一：解析命令行 → 加载配置 → 批量读样本 → 逐样本交给
 :class:`pipeline.pipeline.PipelineRunner` → 断点续跑 checkpoint → 汇总并写出
@@ -25,7 +25,7 @@
       --output outputs/submission.json
 
 PYTHONPATH 的作用：把 src/ 和 FireRed 的运行时依赖目录加进模块搜索
-路径，python 才能找到 szy 包和 kaldi_native_fbank 等 vendor 库
+路径，python 才能找到 pipeline 包和 kaldi_native_fbank 等 vendor 库
 （第三方代码不在 pip 里的通用解法，同 separator.py 的 sys.path 注入）。
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     单独封装成函数（而非在 main 里直接写）是为了可测试：单测可以
     parse_args([...]) 检查解析行为，不必真正跑 main。
     """
-    parser = argparse.ArgumentParser(description="SZY fusion-gate MossFormer2 target-speaker ASR")
+    parser = argparse.ArgumentParser(description="Fusion-gate MossFormer2 target-speaker ASR")
     parser.add_argument("--data-root", required=True)       # 音频根目录（jsonl 内相对路径的基准）
     parser.add_argument("--jsonl", nargs="+", required=True)  # 一个或多个样本清单（pos/neg 可混）；nargs="+" = 至少一个、可多个
     parser.add_argument("--config", default="configs/pipeline.json")

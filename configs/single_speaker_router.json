@@ -1,5 +1,5 @@
 {
-  "format": "moss-single-speaker-router-v2",
+  "format": "single-speaker-router",
   "features": [
     "raw_log_rms",
     "strong_log_rms",

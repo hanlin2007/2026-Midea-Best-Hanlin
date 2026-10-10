@@ -1,4 +1,4 @@
-"""目标说话人语音指令识别管线引擎（SZY/LSZ 系统核心模块，无 CLI）。
+"""目标说话人语音指令识别管线引擎（系统核心模块，无 CLI）。
 
 本模块实现整条生产链路的全部决策逻辑（配置、声学路由、融合门控、
 逐样本处理），入口命令行放在 :mod:`pipeline.cli`，与引擎分离，方便脚本/测试
@@ -32,7 +32,7 @@
   - ELM（外部语言模型）：纠正 ASR 的领域词汇偏向；只作选择后的重解码，
     不参与任何决策，以免污染置信度量程。
 
-三个关键设计（演进细节见 docs/OPTIMIZATION_SUMMARY.md）：
+三个关键设计（演进细节见 docs/OPTIMIZATION.md）：
 1. 主门控 = 两个 ERes2NetV2 前端的线性融合门控（官方预训练 + 分离域微调，
    dataset_dasynth ep6），6 维余弦特征，阈值在 dasynth valid 上标定；
    两个前端共享同一次 Fbank 声学特征（prepare_waveforms 只跑一遍）。
@@ -44,7 +44,7 @@
    对最终通道各跑一次。唤醒与命令共享同一份 AED 权重（峰值显存
    4818 MiB，约为双实例时代的 2/3）。
 
-依赖方向：本模块只允许向下依赖 szy/（共享工具）与 core/（内核）；
+依赖方向：本模块只允许向下依赖 pipeline/（同层工具）与 core/（内核）；
 torch 分离器在运行时按需延迟导入（保证无 torch 环境也能 --help / 单测）。
 """
 # 未来式注解（PEP 604）：让 str | None、tuple[...] 这类新式类型标注在
@@ -73,7 +73,7 @@ from core.wake_anchor import select_wake_anchor
 from core.model_paths import resolve_model_path
 from core.firered import FireRedLLMRecognizer, FireRedRecognizer
 from core.text import normalize_transcript
-# ---- szy 共享工具（同层 helpers + 声学单双人路由） ----
+# ---- pipeline 同层工具（helpers + 声学单双人路由） ----
 from pipeline.helpers import separation_paths_for
 from pipeline.single_speaker import BothSingleRouter
 
@@ -124,17 +124,8 @@ class PipelineConfig:
     firered_llm_batch_size: int = 4       # LLM 后端批量大小
     # ---- 主解码 beam 配置（唤醒通道用 temporary_beam_size(1) 临时压回 1） ----
     firered_beam_size: int = 3            # 命令通道主解码束宽（beam=3 顺带产出 N-best 候选）
-    # 以下四个 conditional 字段是"条件 beam"实验的遗留配置位（实验未采用，
-    # 见 docs/OPTIMIZATION_SUMMARY.md 附录"未采用的其他项"），保留以兼容
-    # 历史配置文件；当前代码路径不读取它们。
-    firered_beam_mode: str = "always"     # "always" or "conditional"（未采用，保留位）
-    firered_conditional_gate_margin: float = 0.15
-    firered_conditional_switch_margin: float = 0.0
-    firered_conditional_confidence_threshold: float = 0.7
     # ---- N-best 保守 MBR 重排（路由选定后对选中通道执行一次） ----
     firered_nbest_mode: str = "off"       # "off" or "conservative_mbr"
-    firered_nbest_beam_size: int = 3      # 历史二次解码用的束宽（现优先复用主解码候选）
-    firered_nbest_count: int = 3          # 参与 MBR 的候选条数
     firered_nbest_min_confidence_gain: float = 0.03   # 换人闸 1：最低置信度增益
     firered_nbest_min_mbr_risk_reduction: float = 0.05  # 换人闸 2：最低风险下降
     # ---- ELM 外部语言模型（只作选择后重解码，不参与主解码/决策） ----
@@ -143,20 +134,8 @@ class PipelineConfig:
     # ELM 重解码使用的 beam。ELM 不再参与主解码，只在路由选定后对选中
     # 通道重解码一次，因此它的 beam 与主解码的 firered_beam_size 解耦。
     firered_elm_beam_size: int = 3
-    # ---- 音色切换规则的三个切点（历史 V100 路线；现产线由声学路由接管） ----
-    # 默认值 0.70/0.57/0.05 是 ELM 融入主解码时代（confidence ~0.60 量程）
-    # 标定的历史值；ELM 后处理化之后 confidence 回到 ~0.88 量程，生产配置
-    # 里给的是在新量程上重扫的 0.88/0.76/-0.03。切勿跨量程混用（实测掉 0.0027）。
-    firered_switch_confidence_high: float = 0.70
-    firered_switch_confidence_low: float = 0.57
-    firered_switch_sv_diff_tau: float = 0.05
-    # 命令通道切换策略（历史 V100 重放位）：
-    #   "timbre_rule" —— should_switch_command_timbre(confidence x keyword x sv_diff)
-    #   "always"      —— 无条件采用分离通道（ft 余弦最高的一路），规则短路为恒真
-    # 现产线路由由 both_single_mode 的声学分类器接管，本字段不参与决策。
-    command_switch_mode: str = "timbre_rule"
     # ---- 声学单双人路由（双单人独立短路；生产显式开启） ----
-    both_single_mode: str = "off"         # "off"（严格复现历史 V100）or "sft_raw_cosine"
+    both_single_mode: str = "off"         # "off"（关闭短路，全走门控）or "sft_raw_cosine"
     both_single_backend: str = "configs/single_speaker_router.json"  # 20 维 logistic 分类器 bundle
     both_single_sft_threshold: float = 0.29  # 双单人分支的同人余弦阈值
     # ---- 分离器 ----
@@ -449,7 +428,7 @@ class PipelineRunner:
         print("[初始化] ✓ FusionGate 加载完成", flush=True)
 
         # 声学单双人路由器（纯波形特征，不花 ASR）：生产配置显式开启；
-        # "off" 时严格复现历史 V100 流程
+        # "off" 时不启用短路，全部样本走融合门控流程
         if config.both_single_mode not in {"off", "sft_raw_cosine"}:
             raise ValueError("both_single_mode must be off or sft_raw_cosine")
         self.both_single_router = (
@@ -714,7 +693,7 @@ class PipelineRunner:
 
         （中文）选择后处理两件套：先 MBR 重排、再 ELM 重解码，只作用在
         路由选中的那一路。它们不再可能反向影响门控/路由——这是 Phase 2
-        的核心不变量（详见 docs/OPTIMIZATION_SUMMARY.md 附录）。
+        的核心不变量（详见 docs/OPTIMIZATION.md）。
         """
         nbest = self._nbest_redecode(audio, baseline_text, baseline_confidence)
         final_text, elm_applied, elm_text = self._elm_redecode(audio, nbest["text"])

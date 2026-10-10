@@ -19,7 +19,7 @@ reverb 子集 SI-SDR 比混合还差 6~14dB）。dasynth 提供 18k 条"腐蚀�
 
 用法（conda env: yuyin，仓库根目录）：
   CUDA_VISIBLE_DEVICES=2 PYTHONPATH=src \
-  python -m pipeline.train --run-name mossft_v1 \
+  python -m pipeline.train --run-name mossft \
     --data-root ../dataset_dasynth \
     --init ../exp_sep/clearvoice_ckpt/MossFormer2_SS_16K/last_best_checkpoint.pt
 """
@@ -37,7 +37,7 @@ import soundfile as sf                           # 音频读取
 import torch                                     # 深度学习框架本体
 from torch.utils.data import DataLoader, Dataset # 数据管道：数据集协议 + 多进程批量加载
 
-# 从本文件位置推导仓库根：parents[2] 上溯两级（parents[0]=src/szy，
+# 从本文件位置推导仓库根：parents[2] 上溯两级（parents[0]=src/pipeline，
 # parents[1]=src，parents[2]=仓库根）。_WS 是仓库的上级目录（workspace），
 # dasynth 数据与官方权重就放在那里
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -46,8 +46,8 @@ DEFAULT_DATA_ROOT = _WS / "dataset_dasynth"
 DEFAULT_INIT = _WS / "exp_sep" / "clearvoice_ckpt" / "MossFormer2_SS_16K" / "last_best_checkpoint.pt"
 SR = 16000                                    # 采样率常量（与 core.audio.SAMPLE_RATE 同值）
 
-# 先注入路径再 import szy：本脚本以 `python -m pipeline.train` 方式运行，此时
-# src/ 已在搜索路径里；但直接 `python src/szy/train.py` 运行时则不在，
+# 先注入路径再 import pipeline：本脚本以 `python -m pipeline.train` 方式运行，此时
+# src/ 已在搜索路径里；但直接 `python src/pipeline/train.py` 运行时则不在，
 # 所以显式注入更稳。third_party 供 separator 里 mossformer2 模型定义使用。
 # 与 pipeline 的延迟导入不同：训练脚本本来就是"必须装 torch 的环境"，
 # 没有"无 torch 也能跑"的需求，所以顶层 import 即可

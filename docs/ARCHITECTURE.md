@@ -124,7 +124,7 @@ vendor     third_party/mossformer2/   外部模型定义（ClearerVoice-Studio�
 
 ### 3.4 `configs/`（2 个）
 
-- `pipeline.json`：生产配置。`PipelineConfig` 的 37 个字段全部有默认值，
+- `pipeline.json`：生产配置。`PipelineConfig` 的 27 个字段全部有默认值，
   JSON 只覆盖要改的项；出现未知键直接报错（fail fast，防拼写错误）。
   关键项：门控阈值 −0.6469、beam=3、N-best conservative_mbr、ELM 0.15、
   双单人 sft_raw_cosine（同人阈值 0.29）、batch_writes 100。

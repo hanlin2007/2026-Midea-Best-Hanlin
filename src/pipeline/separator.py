@@ -1,4 +1,4 @@
-"""dasynth 域适配微调的 MossFormer2_SS_16K torch 分离器（SZY 音频前端）。
+"""dasynth 域适配微调的 MossFormer2_SS_16K torch 分离器（音频前端）。
 
 把一段混合语音盲分离成两路（ms0/ms1），整波推理、peak→0.5 归一化、
 ``_ms0``/``_ms1`` 落盘缓存。模型定义 vendor 在 ``third_party/mossformer2/``
@@ -42,7 +42,7 @@ from pipeline.helpers import read_mono_16k          # 严格输入校验（采�
 # 避免重复 import 本模块时路径列表越积越长。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # 逐级说明：__file__ 是本文件路径；resolve() 消除符号链接/相对段；
-# parents[2] 是"上溯两级"：parents[0]=src/szy，parents[1]=src，
+# parents[2] 是"上溯两级"：parents[0]=src/pipeline，parents[1]=src，
 # parents[2]=仓库根目录——从文件自身位置推导仓库根，不依赖"从哪里启动"
 _THIRD_PARTY = _REPO_ROOT / "third_party"
 if str(_THIRD_PARTY) not in sys.path:

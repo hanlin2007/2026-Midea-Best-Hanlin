@@ -58,7 +58,7 @@ def summarize(results: list[dict[str, Any]], duration: float) -> dict[str, Any]:
     for row in results:
         routes[row.get("route", "unknown")] = routes.get(row.get("route", "unknown"), 0) + 1
     return {
-        "route": "szy",
+        "route": "pipeline",
         "sample_count": len(results),
         "positive_count": len(positive),
         "positive_nonempty": nonempty,
@@ -205,7 +205,7 @@ def generate_report(detail_path: str | Path) -> str:
     routes = summary.get("routes", {})
 
     lines.append("=" * 72)
-    lines.append("  SZY Pipeline Report")
+    lines.append("  Pipeline Report")
     lines.append(f"  Generated from: {Path(detail_path).resolve()}")
     lines.append("=" * 72)
     lines.append("")

@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 
-FORMAT = "moss-single-speaker-router-v2"
+FORMAT = "single-speaker-router"
 # 20 维特征的固定顺序：与训练时喂给 logistic 的特征向量顺序一一对应，
 # 加载 bundle 时逐一校验，顺序错位立即报错（同 FusionGate 的"隐形契约"）
 FEATURE_NAMES = (
@@ -208,7 +208,7 @@ class BothSingleDecision:
 
 
 class BothSingleRouter:
-    """加载外部训练的 V2 线性分类器并识别"双单人"场景。
+    """加载外部训练的线性分类器并识别"双单人"场景。
 
     分类器阈值保存在模型包中，训练和阈值选择均未使用 DatasetA。
     ``same_speaker_threshold`` 只用于双单人分支中的 SFT 原始余弦判断。
