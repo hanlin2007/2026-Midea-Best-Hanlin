@@ -26,14 +26,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]  # 仓库根（本文件在 scripts/experiments/ 下）
 sys.path.insert(0, str(ROOT / "src"))       # 允许不设 PYTHONPATH 直接运行
 
-from midea_qiji.recognizers import FireRedRecognizer  # noqa: E402
-from midea_qiji.text import levenshtein  # noqa: E402
+from core.firered import FireRedRecognizer  # noqa: E402
+from core.text import levenshtein  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="outputs/ 下的运行名（读取 <run>_detail.json 与 cache/）")
-    ap.add_argument("--config", default="configs/pipeline_firered.json")
+    ap.add_argument("--config", default="configs/pipeline.json")
     ap.add_argument("--data-root", default="dataset/dataset_test/datasetA/datasetA",
                     help="音频根目录（样本 id 即其下的相对路径）")
     ap.add_argument("--out", default=None)

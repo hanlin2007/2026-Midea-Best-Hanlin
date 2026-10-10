@@ -1,7 +1,7 @@
-"""SZY 系统命令行入口（`python -m szy.cli`）。
+"""SZY 系统命令行入口（`python -m pipeline.cli`）。
 
 职责单一：解析命令行 → 加载配置 → 批量读样本 → 逐样本交给
-:class:`szy.pipeline.SzyRunner` → 断点续跑 checkpoint → 汇总并写出
+:class:`pipeline.pipeline.PipelineRunner` → 断点续跑 checkpoint → 汇总并写出
 提交物（submission / detail / manifest 三件套 + 人类可读报告）。
 
 "职责单一"的体现：本文件只做"编排"（把各组件按顺序串起来），所有
@@ -17,11 +17,11 @@
 
 用法（仓库根目录，推荐直接走 scripts/run.sh 已配好环境变量）：
     PYTHONPATH=src:model/runtime/vendor \
-      python -m szy.cli \
+      python -m pipeline.cli \
       --data-root dataset/dataset_test/datasetA/datasetA \
       --jsonl dataset/dataset_test/datasetA/datasetA/pos.jsonl \
               dataset/dataset_test/datasetA/datasetA/neg.jsonl \
-      --config configs/pipeline_firered.json \
+      --config configs/pipeline.json \
       --output outputs/submission.json
 
 PYTHONPATH 的作用：把 src/ 和 FireRed 的运行时依赖目录加进模块搜索
@@ -38,10 +38,10 @@ from typing import Any                           # 结果行的宽松类型
 
 from tqdm.auto import tqdm                       # 进度条（.auto 自动适配终端/notebook）
 
-from midea_qiji.infer import read_many_jsonl, submission_id
-from szy.helpers import sha256_file              # 资产指纹
-from szy.pipeline import SzyConfig, SzyRunner, load_config
-from szy.reporting import generate_report, summarize, write_outputs
+from core.samples import read_many_jsonl, submission_id
+from pipeline.helpers import sha256_file              # 资产指纹
+from pipeline.engine import PipelineConfig, PipelineRunner, load_config
+from pipeline.reporting import generate_report, summarize, write_outputs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SZY fusion-gate MossFormer2 target-speaker ASR")
     parser.add_argument("--data-root", required=True)       # 音频根目录（jsonl 内相对路径的基准）
     parser.add_argument("--jsonl", nargs="+", required=True)  # 一个或多个样本清单（pos/neg 可混）；nargs="+" = 至少一个、可多个
-    parser.add_argument("--config", default="configs/pipeline_firered.json")
+    parser.add_argument("--config", default="configs/pipeline.json")
     parser.add_argument("--output", default="outputs/submission.json")   # 竞赛格式提交物
     parser.add_argument("--final-output", default="outputs/detail.json") # 全字段明细（含门控特征）
     parser.add_argument("--checkpoint-output", default="outputs/checkpoint.json")  # 断点续跑存档
@@ -90,7 +90,7 @@ def main() -> None:
         # 赋值 config.model_root = ...；这里取 __dict__（全部字段值的
         # 字典）→ 展开 → 覆盖 model_root 键 → 重新构造一个新实例。
         # 旧实例不受影响，新实例只差这一个字段
-        config = SzyConfig(**{**config.__dict__, "model_root": args.model_root})
+        config = PipelineConfig(**{**config.__dict__, "model_root": args.model_root})
     # 读样本：jsonl 每行一条 {"唤醒音频": ..., "识别音频": ..., "识别文本": ...}，
     # 相对路径以 data_root 为基准拼成绝对路径（Sample 对象列表）
     samples = read_many_jsonl(args.jsonl, args.data_root)
@@ -135,12 +135,12 @@ def main() -> None:
 
     # runner 的输出目录取提交物所在目录（detail/checkpoint 的默认值也
     # 都在 outputs/ 下）；Path(...).parent 取父目录
-    runner = SzyRunner(config, Path(args.output).parent)
+    runner = PipelineRunner(config, Path(args.output).parent)
     started = time.perf_counter()
     pending_checkpoint_rows = 0
     # tqdm 包住可迭代对象即显示进度条：desc 是前缀文字，unit="utt" 让
     # 速率显示为 "x utt/s"（utt = utterance，语音界的"条"）
-    for sample in tqdm(samples, desc="szy", unit="utt"):
+    for sample in tqdm(samples, desc="pipeline", unit="utt"):
         result = runner.process(sample)
         results.append(result)
         pending_checkpoint_rows += 1
@@ -150,20 +150,20 @@ def main() -> None:
         # 代价是"中断最多损失一个批次"，秒级推理下可接受
         if pending_checkpoint_rows >= max(config.batch_writes, 1):
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            checkpoint_path.write_text(json.dumps({"version": "szy", "duration": elapsed, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+            checkpoint_path.write_text(json.dumps({"version": "pipeline", "duration": elapsed, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
             pending_checkpoint_rows = 0
     duration = elapsed_before + time.perf_counter() - started
     # 正常结束时保存尾部不足一个批次的结果；恰好落盘则不重复重写
     if pending_checkpoint_rows or not checkpoint_path.is_file():
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path.write_text(json.dumps({"version": "szy", "duration": duration, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+        checkpoint_path.write_text(json.dumps({"version": "pipeline", "duration": duration, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
     # 收尾把 ASR 缓存里最后不足一批的条目落盘（进程内缓存始终有，
     # 是否持久化由配置控制）
     runner.flush_caches()
 
     # ---- 汇总 + 提交物 ----
     summary = summarize(results, duration)
-    summary["route"] = "szy"                     # 汇总也带上路线标记（审计口径）
+    summary["route"] = "pipeline"                     # 汇总也带上路线标记（审计口径）
     write_outputs(results, summary, Path(args.output), Path(args.final_output))
     _auto_report(Path(args.final_output))
 
@@ -172,7 +172,7 @@ def main() -> None:
     # 而内容不动，哈希才能证明"这次跑的和上次跑的是同一份权重"。
     # resolve() 把相对路径转绝对路径，任何工作目录下哈希目标一致
     manifest = {
-        "version": "szy",
+        "version": "pipeline",
         "config": config.__dict__,               # 完整配置快照（frozen 对象的 __dict__ 即字段字典）
         "data_root": str(Path(args.data_root).resolve()),
         "jsonl": [str(Path(path).resolve()) for path in args.jsonl],
@@ -193,6 +193,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # 作为脚本直接执行（python -m szy.cli / python cli.py）时运行 main；
+    # 作为脚本直接执行（python -m pipeline.cli / python cli.py）时运行 main；
     # 被 import 时（如单测 import build_parser）不运行——Python 惯用法
     main()

@@ -1,4 +1,4 @@
-"""midea_qiji.recognizers：全部 ASR 识别后端（统一 transcribe 接口）。
+"""core.recognizers：全部 ASR 识别后端（统一 transcribe 接口）。
 
 四个后端按"转写口径 + 置信度语义"分工：
 
@@ -10,7 +10,7 @@
                                  （[kws, cmd] → 目标说话人文本，实验后端）。
 
 公共约定：``transcribe_many(paths) -> list[str]`` 返回归一化文本；管线内部
-需要置信度时统一走 szy.helpers.transcribe_firered_rows（访问
+需要置信度时统一走 pipeline.helpers.transcribe_firered_rows（访问
 ``_model.transcribe`` 的原始行）。重型依赖（torch / peft / FireRed 包 /
 modelscope）一律延迟导入，保证本模块可被轻量环境 import。
 
@@ -20,7 +20,7 @@ modelscope）一律延迟导入，保证本模块可被轻量环境 import。
   社区常见的"协议式多态"——不强制继承，只约定行为。FireRedLLMRecognizer
   更是把自己的 transcribe() 暴露成 ``_model.transcribe``，让上层能用与
   FireRedRecognizer 完全相同的代码访问（见该类的 self._model = self）。
-- ``szy.helpers.transcribe_firered_rows`` 属于上层 szy 系统的入口：上层
+- ``pipeline.helpers.transcribe_firered_rows`` 属于上层 szy 系统的入口：上层
   来调用本内核层的能力，内核层自身绝不 import 任何 szy/ 模块——依赖
   方向只能自下而上，这是分层架构的纪律。
 
@@ -29,7 +29,7 @@ modelscope）一律延迟导入，保证本模块可被轻量环境 import。
 关键导出：QwenRecognizer / FireRedRecognizer / FireRedLLMRecognizer /
 ConditionedQwenRecognizer。
 
-依赖：midea_qiji.text / .audio / .paths / .infer（suppress_model_output）。
+依赖：core.text / .audio / .paths / .infer（suppress_model_output）。
 重型依赖（torch / peft / qwen_asr / fireredasr2）全部在构造函数内延迟导入。
 
 用法（通常由 infer.main 按 config.asr_backend 装配，不必手写）：
@@ -46,8 +46,8 @@ from typing import Any
 # 的 import 全部放在 main() 函数内部（延迟导入），所以两个模块互相引用
 # 时，import 顺序不会形成环。
 from .audio import load_audio_mono_16k
-from .infer import suppress_model_output
-from .paths import DEFAULT_FIRED_VENDOR, resolve_model_path
+from .samples import suppress_model_output
+from .model_paths import DEFAULT_FIRED_VENDOR, resolve_model_path
 from .text import extract_asr_text, normalize_transcript
 
 
@@ -254,7 +254,7 @@ class FireRedRecognizer:
 
         （中文）N-best 列表是 beam 搜索的副产品：beam=3 解码时模型本来就
         维护了多条候选，顺手取出（不再多花一次推理），供保守 MBR 重排序
-        使用（见 midea_qiji.firered_nbest）。构造时 nbest<2 则退化为单候选。
+        使用（见 core.firered_nbest）。构造时 nbest<2 则退化为单候选。
 
         Args:
             audio_paths: List of audio file paths
@@ -427,7 +427,7 @@ class FireRedLLMRecognizer:
     def transcribe(self, batch_uttid: list[str], batch_wav_path: list[str]) -> list[dict[str, Any]]:
         """与 FireRedAsr2.transcribe 的 llm 分支同签名，返回带 confidence 的行。
 
-        保持同签名是为了让上层 szy.helpers.transcribe_firered_rows 能用
+        保持同签名是为了让上层 pipeline.helpers.transcribe_firered_rows 能用
         同一套代码访问本后端（上层只认 _model.transcribe(uttid, wav_path)）。
         """
         torch = self._torch

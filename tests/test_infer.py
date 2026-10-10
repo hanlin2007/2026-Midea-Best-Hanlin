@@ -1,4 +1,4 @@
-"""midea_qiji 基线数据/文本/报告口径的单元测试（numpy-only，无需模型）。
+"""core 基线数据/文本/报告口径的单元测试（numpy-only，无需模型）。
 
 这组测试锁死的是"口径"——文本归一化规则、id 生成规则、manifest 中文
 字段、报告与竞赛提交物的 schema。这些规则一旦被"顺手改进"，官方评测
@@ -29,8 +29,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from midea_qiji.infer import Sample, normalize_transcript, read_many_jsonl, submission_id, write_reports
-from szy.reporting import summarize, write_outputs
+from core.samples import Sample, normalize_transcript, read_many_jsonl, submission_id, write_reports
+from pipeline.reporting import summarize, write_outputs
 
 
 class InferTest(unittest.TestCase):

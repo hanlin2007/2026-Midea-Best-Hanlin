@@ -1,4 +1,4 @@
-"""szy.metrics：分离质量指标（SI-SDR / SI-SNR 家族）。
+"""pipeline.metrics：分离质量指标（SI-SDR / SI-SNR 家族）。
 
 历史上 SI-SDR 在训练 / 诊断 / 对照验证三处各有一份 numpy 实现，口径略有
 出入；现已统一收敛到此模块：

@@ -1,10 +1,10 @@
 """szy 共享工具（文件哈希/指令特征/置信度/音频读取）的单元测试。
 
-覆盖重构中从 szy_v1/szy_v2/scripts 收敛到 szy.helpers 的公共函数，
+覆盖重构中从 szy_v1/szy_v2/scripts 收敛到 pipeline.helpers 的公共函数，
 保证共享实现与历史语义一致（numpy-only，无需模型/GPU）。
 
 这组测试的背景：重构把散落在三个版本里的重复实现（sha256、指令特征、
-置信度解析、音频读取）收敛成了 szy.helpers 里的唯一实现。"收敛"的
+置信度解析、音频读取）收敛成了 pipeline.helpers 里的唯一实现。"收敛"的
 风险在于：新实现只要有一处与某个历史版本语义不同，使用它的管线就会
 静默改变行为。所以每个函数都配了测试，而且测试策略是"对照 oracle"：
 - sha256 直接和标准库 hashlib 的整读结果比对（标准库就是真理）；
@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from szy.helpers import (
+from pipeline.helpers import (
     asr_confidence,
     command_features,
     duration_seconds,
@@ -50,9 +50,9 @@ class SzyHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "asset.bin"
             # 构造一个比单个哈希块（1MB）更大的测试文件：
-            # "midea_qiji" 是 10 字节，×1000 = 10000 字节，足够跨越
+            # "core" 是 10 字节，×1000 = 10000 字节，足够跨越
             # 多次 read 循环，能真正测到"多块拼接"的路径。
-            path.write_bytes(b"midea_qiji" * 1000)
+            path.write_bytes(b"core" * 1000)
             self.assertEqual(sha256_file(path), hashlib.sha256(path.read_bytes()).hexdigest())
 
     def test_command_features_counts_keywords_and_rate(self) -> None:
@@ -63,7 +63,7 @@ class SzyHelpersTest(unittest.TestCase):
         # 它允许在默认 7 位小数精度内相等即可。
         self.assertAlmostEqual(chars_per_sec, 4.0)
         # "打开" 与 "空调" 各命中一次 CMD_KW
-        # （CMD_KW 是 szy.helpers 里的指令关键词正则表）。
+        # （CMD_KW 是 pipeline.helpers 里的指令关键词正则表）。
         self.assertEqual(keywords, 2.0)
 
     def test_command_features_short_clip_floor(self) -> None:

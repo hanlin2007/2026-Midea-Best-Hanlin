@@ -1,4 +1,4 @@
-"""midea_qiji.audio：音频常量与 WAV 读取工具。
+"""core.audio：音频常量与 WAV 读取工具。
 
 统一全仓库的采样率常量（16k）与两种读取口径：
 
@@ -14,7 +14,7 @@
 语义，才能保证全仓库喂给模型的都是同一种波形。
 
 原 read_wav 定义于 gate.py、load_audio_mono_16k 定义于 infer.py，现收敛
-至此；gate.py 仍通过导入保持 ``from midea_qiji.gate import read_wav`` 旧
+至此；gate.py 仍通过导入保持 ``from core.embeddings import read_wav`` 旧
 路径可用。
 
 依赖：numpy / soundfile；重采样分支才需要 torch/torchaudio（延迟导入）。

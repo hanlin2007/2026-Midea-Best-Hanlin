@@ -51,8 +51,8 @@ sys.path.insert(0, str(_WS / "model" / "runtime" / "vendor"))
 # 上面 insert 之后 import 才能成功。noqa: E402 是告诉 flake8/linter：
 # "我知道 import 不在文件顶部（违反 E402 规则），这是有意的"——
 # 因为本脚本的 import 依赖前面几行路径注入。
-from midea_qiji.recognizers import FireRedRecognizer  # noqa: E402
-from szy.helpers import transcribe_firered_rows  # noqa: E402
+from core.firered import FireRedRecognizer  # noqa: E402
+from pipeline.helpers import transcribe_firered_rows  # noqa: E402
 
 # 各数据/产物路径常量。集中在顶部的好处：改路径只动一处；
 # 且一眼能看出本脚本的输入输出全貌。

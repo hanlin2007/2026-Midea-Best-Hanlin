@@ -56,11 +56,11 @@ sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_WS / "model" / "runtime" / "vendor"))
 
 # noqa: E402 = 告诉 linter "import 不在文件顶是有意的，别报"。
-from midea_qiji.gate import ModelScopeEmbedder, read_wav  # noqa: E402
-from midea_qiji.moss_candidate import should_switch_command_timbre  # noqa: E402
-from midea_qiji.paths import resolve_model_path  # noqa: E402
-from midea_qiji.text import levenshtein, normalize_transcript  # noqa: E402
-from szy.helpers import command_features, duration_seconds  # noqa: E402
+from core.embeddings import ModelScopeEmbedder, read_wav  # noqa: E402
+from core.wake_anchor import should_switch_command_timbre  # noqa: E402
+from core.model_paths import resolve_model_path  # noqa: E402
+from core.text import levenshtein, normalize_transcript  # noqa: E402
+from pipeline.helpers import command_features, duration_seconds  # noqa: E402
 
 # 路径常量集中定义：输入（detail/文本/分离缓存/融合包/SV 快照）
 # 与输出（sweep 目录）一眼可见。

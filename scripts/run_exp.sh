@@ -11,7 +11,7 @@
 #
 #   <NAME>      运行名；缺省自动生成 run_YYYYMMDD_HHMMSS
 #   --dataset   数据集：A（默认，dataset_test/datasetA/datasetA）或 X（dataset/datasetX）
-#   --config    配置基准（默认 configs/pipeline_firered.json）；会复制一份并把
+#   --config    配置基准（默认 configs/pipeline.json）；会复制一份并把
 #               separation_cache 改指 outputs/<NAME>/cache/separation 后使用
 #   --limit N   分层抽样 N 条冒烟（正负比例与全集一致）
 #   --resume    从 outputs/<NAME>/<NAME>_checkpoint.json 续跑
@@ -48,7 +48,7 @@ fi
 out_dir="${repo}/outputs/${NAME}"
 mkdir -p "${out_dir}"
 
-cfg_base="${CONFIG_ARG:-${repo}/configs/pipeline_firered.json}"
+cfg_base="${CONFIG_ARG:-${repo}/configs/pipeline.json}"
 cfg_tmp="${out_dir}/${NAME}_config.json"
 
 # 复制配置并把分离缓存指到本次运行的目录（同名重跑可命中缓存，
@@ -75,7 +75,7 @@ CUDA_VISIBLE_DEVICES="${GPU}" \
 PYTHONPATH="${repo}/src:${repo}/model/runtime/vendor" \
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${repo}/model/workspace/midea/models/modelscope}" \
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" \
-"${python_bin}" -u -m szy.cli \
+"${python_bin}" -u -m pipeline.cli \
   --data-root "${data_root}" \
   --jsonl "${data_root}/pos.jsonl" "${data_root}/neg.jsonl" \
   --config "${cfg_tmp}" \

@@ -16,7 +16,7 @@ from pathlib import Path
 # 模块搜索路径（与 separator.py 的 vendor 注入同一手法）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from szy.reporting import generate_report  # noqa: E402
+from pipeline.reporting import generate_report  # noqa: E402
 
 
 def main() -> None:

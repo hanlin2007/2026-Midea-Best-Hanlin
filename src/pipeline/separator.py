@@ -5,7 +5,7 @@
 （外部代码，未改动），权重可以是：
 
   - ClearerVoice 官方预训练（ModelScope iic/ClearerVoice-Studio）；
-  - 经 ``szy.train`` 在 dataset_dasynth 上域适配微调的 .pt
+  - 经 ``pipeline.train`` 在 dataset_dasynth 上域适配微调的 .pt
     （生产用法：修复官方分离器在混响/掩盖样本上的崩塌）。
 
 "盲分离"指模型不知道谁在说话，只是把混合语音拆成两路（ms0/ms1），哪路
@@ -13,12 +13,12 @@
 只做"拆"这一件事，职责单一。MossFormer2 是端到端神经网络（约 40M 参数），
 整段波形一次前向就出两路估计，不需要传统方法的迭代过程。
 
-输入音频读取共用 ``szy.helpers.read_mono_16k``（严格 16k 单声道 float32）。
+输入音频读取共用 ``pipeline.helpers.read_mono_16k``（严格 16k 单声道 float32）。
 
 注意：本模块在 import 时会把 ``third_party/`` 加入 sys.path 并引入
 mossformer2 模型定义（依赖 torch），因此管线里采用延迟导入。
-（"延迟导入"= 调用方把 ``import szy.separator`` 写进函数体内，而不是模块
-顶部——只要不构造 SzyRunner，就不会触发本模块的 import，也就不会碰到
+（"延迟导入"= 调用方把 ``import pipeline.separator`` 写进函数体内，而不是模块
+顶部——只要不构造 PipelineRunner，就不会触发本模块的 import，也就不会碰到
 torch 依赖。）
 """
 from __future__ import annotations
@@ -30,8 +30,8 @@ from types import SimpleNamespace              # 把超参字典当"轻量配置
 import numpy as np                             # 波形数组与峰值归一化
 import soundfile as sf                         # 分离结果 wav 写出
 
-from midea_qiji.audio import SAMPLE_RATE       # 16k 常量（全系统统一口径）
-from szy.helpers import read_mono_16k          # 严格输入校验（采样率/单声道/finite）
+from core.audio import SAMPLE_RATE       # 16k 常量（全系统统一口径）
+from pipeline.helpers import read_mono_16k          # 严格输入校验（采样率/单声道/finite）
 
 # vendor 模型定义：third_party/mossformer2 是独立第三方代码，未打进 pip 包，
 # 这里手动把仓库内的 third_party 目录放进模块搜索路径再 import。

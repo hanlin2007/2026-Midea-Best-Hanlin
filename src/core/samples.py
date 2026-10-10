@@ -1,6 +1,6 @@
-"""midea_qiji.infer：DatasetA 基线（ERes2NetV2 门控 + Qwen3-ASR）的编排与 CLI。
+"""core.infer：DatasetA 基线（ERes2NetV2 门控 + Qwen3-ASR）的编排与 CLI。
 
-本模块是 midea_qiji 内核的"主程序"：负责配置加载、JSONL 样本读取、断点
+本模块是 core 内核的"主程序"：负责配置加载、JSONL 样本读取、断点
 续跑、识别后端/门控装配、批量 ASR 调度、指标汇总与提交物写出。算法部件
 已按职责拆分到同包子模块：
 
@@ -11,17 +11,17 @@
   - ``gate.py``         双前端 MLP 门控与声纹 embedding。
 
 为兼容既有代码与文档，本模块 re-export 了 text / paths 的公共名（如
-``from midea_qiji.infer import levenshtein`` 仍可用）；新代码请直接从
-``midea_qiji.text`` / ``midea_qiji.paths`` 导入。
+``from core.samples import levenshtein`` 仍可用）；新代码请直接从
+``core.text`` / ``core.paths`` 导入。
 
 re-export 说明：重构前这些函数就活在 infer.py 里，历史脚本/文档按
-midea_qiji.infer.<name> 引用它们；重构后函数搬家了，re-export 让旧路径
+core.infer.<name> 引用它们；重构后函数搬家了，re-export 让旧路径
 继续可用（兼容性护栏），# noqa: F401 则是告诉 linter"这是有意为之"。
 这也解释了为什么 recognizers.py 能从 .infer 顶部 import——infer 对
 recognizers/gate 的 import 全部放在 main() 内部（按需装配），不会成环。
 
-用法（baseline 路线，SZY 系列请走 szy 系统入口（python -m szy.cli））：
-  PYTHONPATH=src python -m midea_qiji.infer \\
+用法（baseline 路线，SZY 系列请走 szy 系统入口（python -m pipeline.cli））：
+  PYTHONPATH=src python -m core.infer \\
     --data-root dataset/dataset_test/datasetA/datasetA \\
     --jsonl dataset/.../pos.jsonl --config configs/xxx.json
 
@@ -50,15 +50,15 @@ from typing import Any, Iterable
 import numpy as np
 from tqdm.auto import tqdm   # 进度条（auto 版自动选择 notebook/终端渲染）
 
-# ---- re-export（兼容旧导入路径 midea_qiji.infer.<name>） ----
-from midea_qiji.paths import (  # noqa: F401
+# ---- re-export（兼容旧导入路径 core.infer.<name>） ----
+from core.model_paths import (  # noqa: F401
     DEFAULT_FIRED_MODEL,
     DEFAULT_FIRED_REPO,
     DEFAULT_FIRED_VENDOR,
     PACKAGE_MODEL_ROOT,
     resolve_model_path,
 )
-from midea_qiji.text import cer, extract_asr_text, levenshtein, normalize_transcript  # noqa: F401
+from core.text import cer, extract_asr_text, levenshtein, normalize_transcript  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -400,7 +400,7 @@ def main() -> None:
     # 那条路径的重型依赖（选了 baseline 就不碰 gate.py 的双模型加载；
     # 反之亦然）。
     if config.gate_mode == "dual_mlp":
-        from midea_qiji.gate import DualMLPGate
+        from core.embeddings import DualMLPGate
 
         # 前置校验：缺 dual_backend 权重路径时立即报错，别等跑到一半才发现。
         if config.dual_backend is None:
@@ -419,12 +419,12 @@ def main() -> None:
         verifier = SpeakerVerifier(config.sv_model, config.sv_device or config.device, args.model_root)
     # ASR 后端装配：同样的"按需导入 + 分支内装配"模式。
     if config.asr_backend == "firered":
-        from midea_qiji.recognizers import FireRedRecognizer
+        from core.firered import FireRedRecognizer
 
         print(f"Loading FireRedASR2-AED on {config.device}...", flush=True)
         recognizer = FireRedRecognizer(config.firered_model, config.device, config.firered_repo)
     elif config.asr_backend == "qwen_lora":
-        from midea_qiji.recognizers import ConditionedQwenRecognizer
+        from core.firered import ConditionedQwenRecognizer
 
         if config.qwen_lora_adapter is None:
             raise ValueError("asr_backend=qwen_lora requires qwen_lora_adapter in config")
@@ -432,7 +432,7 @@ def main() -> None:
         recognizer = ConditionedQwenRecognizer(config.asr_model, config.qwen_lora_adapter, config.device, args.model_root)
     else:
         # qwen 是默认分支（baseline 口径）。
-        from midea_qiji.recognizers import QwenRecognizer
+        from core.firered import QwenRecognizer
 
         print(f"Loading Qwen3-ASR on {config.device}...", flush=True)
         recognizer = QwenRecognizer(config.asr_model, config.device, args.model_root, args.asr_batch_size)
@@ -522,9 +522,9 @@ def main() -> None:
 
 
 # "模块即脚本"的分水岭：当文件被 import（如 recognizers.py 顶部
-# ``from .infer import suppress_model_output``，或测试套件）时，__name__
-# 是 "midea_qiji.infer"，main() 不会执行——只导入定义，无副作用；
-# 当文件作为脚本运行（python -m midea_qiji.infer）时，__name__ 才是
+# ``from .samples import suppress_model_output``，或测试套件）时，__name__
+# 是 "core.infer"，main() 不会执行——只导入定义，无副作用；
+# 当文件作为脚本运行（python -m core.infer）时，__name__ 才是
 # "__main__"，此时才真正执行 CLI 主流程。正是这个约定让"既是被引用的
 # 库，又是可执行的命令行工具"得以共存。
 if __name__ == "__main__":

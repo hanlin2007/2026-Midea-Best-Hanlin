@@ -29,11 +29,11 @@
   "firered_switch_sv_diff_tau": -0.03,
   "command_switch_mode": "timbre_rule",
   "both_single_mode": "sft_raw_cosine",
-  "both_single_backend": "configs/moss_single_speaker_router_v2.json",
+  "both_single_backend": "configs/single_speaker_router.json",
   "both_single_sft_threshold": 0.29,
   "moss_model": "model/artifacts/mossformer2_dasynth_sweep_ep6.pt",
   "id_mode": "relative_stem",
-  "separation_cache": "outputs/szy_cache/separation",
+  "separation_cache": "outputs/cache/separation",
   "batch_writes": 100,
   "asr_cache_persistent": false
 }

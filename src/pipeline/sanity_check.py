@@ -12,7 +12,7 @@
 后的回归检查入口。
 
 用法（conda env: yuyin）：
-  CUDA_VISIBLE_DEVICES=1 python -m szy.sanity_check --n 60 \
+  CUDA_VISIBLE_DEVICES=1 python -m pipeline.sanity_check --n 60 \
     --ckpt ../exp_sep/clearvoice_ckpt/MossFormer2_SS_16K/last_best_checkpoint.pt
 """
 from __future__ import annotations
@@ -33,8 +33,8 @@ import sys
 sys.path.insert(0, str(_REPO_ROOT / "third_party"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from szy.metrics import oracle_sisdr  # noqa: E402
-from szy.separator import load_mossformer2  # noqa: E402
+from pipeline.metrics import oracle_sisdr  # noqa: E402
+from pipeline.separator import load_mossformer2  # noqa: E402
 
 DEFAULT_ROOT = _REPO_ROOT.parent / "dataset_dasynth"
 DEFAULT_CKPT = (_REPO_ROOT.parent / "exp_sep" / "clearvoice_ckpt"

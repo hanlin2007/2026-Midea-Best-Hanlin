@@ -19,7 +19,7 @@ reverb 子集 SI-SDR 比混合还差 6~14dB）。dasynth 提供 18k 条"腐蚀�
 
 用法（conda env: yuyin，仓库根目录）：
   CUDA_VISIBLE_DEVICES=2 PYTHONPATH=src \
-  python -m szy.train --run-name mossft_v1 \
+  python -m pipeline.train --run-name mossft_v1 \
     --data-root ../dataset_dasynth \
     --init ../exp_sep/clearvoice_ckpt/MossFormer2_SS_16K/last_best_checkpoint.pt
 """
@@ -44,9 +44,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WS = _REPO_ROOT.parent
 DEFAULT_DATA_ROOT = _WS / "dataset_dasynth"
 DEFAULT_INIT = _WS / "exp_sep" / "clearvoice_ckpt" / "MossFormer2_SS_16K" / "last_best_checkpoint.pt"
-SR = 16000                                    # 采样率常量（与 midea_qiji.audio.SAMPLE_RATE 同值）
+SR = 16000                                    # 采样率常量（与 core.audio.SAMPLE_RATE 同值）
 
-# 先注入路径再 import szy：本脚本以 `python -m szy.train` 方式运行，此时
+# 先注入路径再 import szy：本脚本以 `python -m pipeline.train` 方式运行，此时
 # src/ 已在搜索路径里；但直接 `python src/szy/train.py` 运行时则不在，
 # 所以显式注入更稳。third_party 供 separator 里 mossformer2 模型定义使用。
 # 与 pipeline 的延迟导入不同：训练脚本本来就是"必须装 torch 的环境"，
@@ -55,8 +55,8 @@ sys.path.insert(0, str(_REPO_ROOT / "third_party"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 # noqa: E402 豁免 linter 的"import 不在顶部"——上面必须先改 sys.path
-from szy.metrics import oracle_sisdr, pit_sisnr_loss  # noqa: E402
-from szy.separator import load_mossformer2  # noqa: E402
+from pipeline.metrics import oracle_sisdr, pit_sisnr_loss  # noqa: E402
+from pipeline.separator import load_mossformer2  # noqa: E402
 
 
 # ---------------- 数据 ----------------

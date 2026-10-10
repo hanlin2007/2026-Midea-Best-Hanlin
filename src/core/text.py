@@ -1,4 +1,4 @@
-"""midea_qiji.text：文本归一化、编辑距离与 CER 指标。
+"""core.text：文本归一化、编辑距离与 CER 指标。
 
 全仓库的文本口径统一由本模块负责：数字/百分号转中文、去标点空白、小写
 （``normalize_transcript``），字符级编辑距离（``levenshtein``），CER
@@ -17,7 +17,7 @@ levenshtein 是 moss_candidate 决策规则的基础。这俩函数任何一行�
 ``tests/test_infer.py`` 与 ``tests/test_moss_candidate.py``。
 
 依赖：仅标准库（re / typing）。原实现在 infer.py，拆分后 infer.py 通过
-re-export 保持 ``from midea_qiji.infer import normalize_transcript`` 等
+re-export 保持 ``from core.samples import normalize_transcript`` 等
 旧导入路径可用。
 """
 from __future__ import annotations  # 延迟求值注解：str | None 等新式注解存成字符串，不产生运行时开销

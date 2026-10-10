@@ -1,4 +1,4 @@
-"""midea_qiji.phoneme：拼音音素相似度与唤醒词别名表。
+"""core.phoneme：拼音音素相似度与唤醒词别名表。
 
 为什么需要"拼音相似度"而不是直接用字符编辑距离？
 中文语音识别最常见的错误是"同音字"：参考文本是"你好科慕"，ASR 可能
@@ -58,7 +58,7 @@ def _to_pinyin_str(text: str) -> str:
 def _levenshtein(a: str, b: str) -> int:
     """字符级编辑距离（滚动两行数组，空间 O(n)）。
 
-    与 midea_qiji.text.levenshtein 语义相同；这里单独留一份实现，是因为
+    与 core.text.levenshtein 语义相同；这里单独留一份实现，是因为
     拼音串是 ASCII，本模块希望"只依赖标准库 + pypinyin（可选）"，
     不向上引用 text 模块，保持可以被任意层 import 的轻量性。
     """

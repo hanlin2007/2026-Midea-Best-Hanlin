@@ -15,9 +15,9 @@ MossFormer2 两路输出 vs 干净源（用 metadata 的 SV 通道归属；归�
 是实验系统里诊断工具的标准形态。
 
 用法（conda env: yuyin）：
-  python -m szy.diag_sisdr --data-root ../dataset_dasynth --n 300
-（注意：当前模块名为 szy.diag，实际命令应为 python -m szy.diag——
-docstring 保留历史命名，若运行报错请以模块名 szy.diag 为准。）
+  python -m pipeline.diag_sisdr --data-root ../dataset_dasynth --n 300
+（注意：当前模块名为 pipeline.diag，实际命令应为 python -m pipeline.diag——
+docstring 保留历史命名，若运行报错请以模块名 pipeline.diag 为准。）
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from pathlib import Path                         # 路径
 import numpy as np                               # 统计（均值/中位数/分位数）
 import soundfile as sf                           # 读 wav
 
-from szy.metrics import si_sdr                   # 单通道 SI-SDR（numpy 诊断口径）
+from pipeline.metrics import si_sdr                   # 单通道 SI-SDR（numpy 诊断口径）
 
 # 同 train.py：从本文件位置推导仓库根，默认数据目录在仓库上级的
 # dataset_dasynth（跨机器路径不同时用 --data-root 覆盖）

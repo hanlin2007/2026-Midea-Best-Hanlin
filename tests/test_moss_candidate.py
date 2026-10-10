@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import unittest
 
-from midea_qiji.moss_candidate import (
+from core.wake_anchor import (
     choose_command_candidate,
     select_wake_anchor,
     should_switch_command,

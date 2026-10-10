@@ -12,11 +12,11 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}" \
 PYTHONPATH="${repo}/src:${model_root}/runtime/vendor" \
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${model_root}/workspace/midea/models/modelscope}" \
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" \
-"${python_bin}" -u -m szy.cli \
+"${python_bin}" -u -m pipeline.cli \
   --data-root "${repo}/dataset/dataset_test/datasetA/datasetA" \
   --jsonl "${repo}/dataset/dataset_test/datasetA/datasetA/pos.jsonl" \
           "${repo}/dataset/dataset_test/datasetA/datasetA/neg.jsonl" \
-  --config "${repo}/configs/pipeline_firered.json" \
+  --config "${repo}/configs/pipeline.json" \
   --output "${repo}/outputs/submission.json" \
   --final-output "${repo}/outputs/detail.json" \
   --checkpoint-output "${repo}/outputs/checkpoint.json" \

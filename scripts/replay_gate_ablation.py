@@ -47,8 +47,8 @@ import numpy as np
 # 必须放在 import 之前：import 语句执行时才去 sys.path 里找包。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # noqa: E402：告诉 linter 这个"不在文件顶部的 import"是有意为之。
-from midea_qiji.text import levenshtein as lev  # noqa: E402
-from midea_qiji.text import normalize_transcript  # noqa: E402
+from core.text import levenshtein as lev  # noqa: E402
+from core.text import normalize_transcript  # noqa: E402
 
 # 门控特征的 6 个维度（列顺序与 detail 的 gate_features、融合包权重对齐）：
 # pre_* = 预训练基础模型的余弦；ft_* = 微调模型的余弦；

@@ -258,10 +258,10 @@ def should_switch_command_timbre(
     默认值 0.70 / 0.57 / 0.05 是 ELM 融入主解码时代（confidence 被压到
     ~0.60 量程）标定的历史值；ELM 改为选择后重解码之后 confidence 回到
     ~0.88 量程，在新量程上重扫的值是 0.88 / 0.76 / -0.03（见生产配置
-    configs/pipeline_firered.json 的 firered_switch_* 三项）。沿用旧默认
+    configs/pipeline.json 的 firered_switch_* 三项）。沿用旧默认
     值跑新量程实测掉 0.0027 分，切勿不标定就混用。
     注意：现役产线的指令路由已由声学单双人分类器接管（见
-    szy.pipeline.SzyRunner.process），本规则保留用于历史重放与消融对照。
+    pipeline.pipeline.PipelineRunner.process），本规则保留用于历史重放与消融对照。
     """
 
     if confidence <= confidence_high:  # 低置信区：三个"或"条件，任一命中即切换

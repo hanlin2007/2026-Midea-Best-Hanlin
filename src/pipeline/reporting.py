@@ -1,4 +1,4 @@
-"""szy.reporting：评测汇总与提交物写出。
+"""pipeline.reporting：评测汇总与提交物写出。
 
 ``summarize`` 按 label 区分正负样本，计算 final_cer / final_pr / final_rr、
 路由分布、切换次数与分离错误数；``write_outputs`` 写出竞赛格式的
@@ -13,7 +13,7 @@ detail.json（summary + results）。
   - RR（Reject Rate，负样本拒绝率）：负样本里"输出空"的比例——负样本
     输出任何文字都整条 0 分。公式分 = (1−CER+RR)/2 正是在三者间权衡。
 
-依赖：midea_qiji.text（levenshtein / normalize_transcript）。
+依赖：core.text（levenshtein / normalize_transcript）。
 （本模块同样不依赖 torch：汇总可以在任何轻量环境离线重算，甚至只拿
 detail.json 就能重新统计，不必重新推理。）
 """
@@ -23,7 +23,7 @@ import json                                     # 提交物序列化
 from pathlib import Path                        # 输出路径
 from typing import Any                           # 结果行的宽松类型
 
-from midea_qiji.text import levenshtein, normalize_transcript
+from core.text import levenshtein, normalize_transcript
 
 
 def summarize(results: list[dict[str, Any]], duration: float) -> dict[str, Any]:
@@ -179,7 +179,7 @@ def generate_report(detail_path: str | Path) -> str:
 
     报告的用途是"逐样本病历"：每条样本给出标注 vs 输出 vs CER、唤醒
     通道转写与锚点标记、逐通道余弦、门控分数与路由决策，排查掉分样本
-    时不必在 JSON 里翻字段。管线每次运行结束自动调用（见 szy.cli），
+    时不必在 JSON 里翻字段。管线每次运行结束自动调用（见 pipeline.cli），
     也可离线单独生成：``python scripts/generate_report.py <detail.json>``。
     """
     data = json.loads(Path(detail_path).read_text(encoding="utf-8"))

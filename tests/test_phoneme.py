@@ -2,9 +2,9 @@
 
 覆盖两个 LSZ v4.5 新增的内核模块：
 
-  - ``midea_qiji.phoneme``：拼音空间相似度与唤醒词别名表——
+  - ``core.phoneme``：拼音空间相似度与唤醒词别名表——
     同音字不罚分（"科慕"vs"科目"相似度 0）、别名展开取最优；
-  - ``midea_qiji.firered_nbest``：保守 MBR 重排序——只有"置信度增益
+  - ``core.firered_nbest``：保守 MBR 重排序——只有"置信度增益
     与风险下降同时过闸"才允许换掉 beam 搜索的 top-1。
 
 这两组测试同样是"语义锁"：拼音相似度是 DatasetA 上全系统最大的单项
@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import unittest
 
-from midea_qiji.firered_nbest import conservative_mbr_rerank, normalized_edit_distance
-from midea_qiji.phoneme import WAKE_WORD_ALIASES, phoneme_similarity
+from core.nbest import conservative_mbr_rerank, normalized_edit_distance
+from core.phoneme import WAKE_WORD_ALIASES, phoneme_similarity
 
 
 def _has_pypinyin() -> bool:

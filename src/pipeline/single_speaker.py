@@ -1,4 +1,4 @@
-"""szy.single_speaker：V2 单人判别器，以及"双单人"原始音频余弦路由。
+"""pipeline.single_speaker：V2 单人判别器，以及"双单人"原始音频余弦路由。
 
 该模块只使用原始音频和 MossFormer2 的两路输出，不依赖 ASR 文本：
 

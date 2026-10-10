@@ -1,4 +1,4 @@
-"""midea_qiji.firered_nbest：FireRed N-best 假设的保守 MBR 重排序。
+"""core.firered_nbest：FireRed N-best 假设的保守 MBR 重排序。
 
 背景：beam search（束搜索）在解码时会同时维护多条候选转写
 （N-best 列表）。beam=1 只返回概率最高的一条，可能错过"概率接近但
@@ -12,10 +12,10 @@
 
 两道闸的意义：N-best 重排只在"明显更好"时才改动结果，防止重排序
 本身引入抖动——宁可不换，不可换错。生产上它只作用在路由选定后的
-那一条通道上（见 szy.pipeline.SzyRunner._nbest_redecode），不参与
+那一条通道上（见 pipeline.pipeline.PipelineRunner._nbest_redecode），不参与
 门控/路由决策。
 
-依赖：仅标准库 + midea_qiji.text（levenshtein）。
+依赖：仅标准库 + core.text（levenshtein）。
 """
 from __future__ import annotations
 

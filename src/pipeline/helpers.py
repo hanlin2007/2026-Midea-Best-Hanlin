@@ -1,4 +1,4 @@
-"""szy.helpers：管线共享的通用工具。
+"""pipeline.helpers：管线共享的通用工具。
 
 这些函数历史上分散在多个阶段与脚本里重复实现，已收敛为唯一实现，
 语义与原实现逐字一致（含置信度非有限值回退 1.0、分离缓存文件命名规则）：
@@ -15,7 +15,7 @@
 漏改其中一处，于是不同入口行为不一致、极难排查。现在全局只有一个版本，
 行为变更只改这里一处。
 
-依赖：midea_qiji（文本归一化、Sample/submission_id、静默上下文），
+依赖：core（文本归一化、Sample/submission_id、静默上下文），
 numpy、soundfile。不依赖 torch / modelscope。
 （不依赖 torch 是刻意设计：本模块会被 pipeline/cli 顶层 import，
 只要它不碰 torch，"无 torch 也能 --help / 单测"的承诺才成立。）
@@ -30,9 +30,9 @@ from typing import Any                         # 类型标注：不确定具体�
 import numpy as np                            # 音频数组与向量化数值计算
 import soundfile as sf                        # 音频文件读写（libsndfile 的 Python 绑定）
 
-from midea_qiji.audio import SAMPLE_RATE      # 全系统统一的采样率常量（16000 Hz）
-from midea_qiji.infer import Sample, submission_id, suppress_model_output
-from midea_qiji.text import normalize_transcript
+from core.audio import SAMPLE_RATE      # 全系统统一的采样率常量（16000 Hz）
+from core.samples import Sample, submission_id, suppress_model_output
+from core.text import normalize_transcript
 
 # 指令关键词表：触发切换的前提之一（转写里命中这些词才算"像指令"）。
 # 正则要点：r"" 原始字符串——反斜杠不转义，写正则不用 \\ 双重转义；

@@ -9,8 +9,8 @@ MLP 去融合，让数据自己学出最优组合（"用小网络当裁判"的�
 整段余弦 + 滑窗（1.0s/0.2s）余弦统计 + 时长/能量/削波，每个模型 16 维，拼接成 32 维。
 裁判为 32->32->16->1 的 MLP，权重与标准化参数来自 backend_dual.pt。
 
-read_wav / SAMPLE_RATE 的 canonical 定义在 midea_qiji.audio（本模块 re-export
-以兼容 ``from midea_qiji.gate import read_wav`` 旧导入路径）。
+read_wav / SAMPLE_RATE 的 canonical 定义在 core.audio（本模块 re-export
+以兼容 ``from core.embeddings import read_wav`` 旧导入路径）。
 
 功能：对"唤醒音频（目标说话人注册参考）vs 指令音频（待判定）"这一对波形，
 先提取声纹 embedding，再计算 32 维门控特征，最后输出 0~1 的"含目标说话人"
@@ -21,9 +21,9 @@ read_wav / SAMPLE_RATE 的 canonical 定义在 midea_qiji.audio（本模块 re-e
   - DualMLPGate          双前端 MLP 门控（本模块主角），score()/accept() 打分；
   - cosine_similarity / sliding_windows  特征计算基础件（也与训练端对拍用）。
 
-依赖：numpy + midea_qiji.audio（模块顶层仅这两个，随时可 import）；
+依赖：numpy + core.audio（模块顶层仅这两个，随时可 import）；
 torch / modelscope 在构造函数内延迟导入（见 DualMLPGate.__init__ 的注释）。
-本模块是内核层，不依赖上层 szy/；上层入口（python -m midea_qiji.infer 且
+本模块是内核层，不依赖上层 szy/；上层入口（python -m core.infer 且
 config 里 gate_mode=dual_mlp）在运行时才构造 DualMLPGate，因此轻量用法
 （--help、numpy-only 单元测试）无需安装 torch。
 
@@ -39,11 +39,11 @@ from typing import Sequence
 
 import numpy as np
 
-# read_wav / SAMPLE_RATE 的真实定义在 midea_qiji.audio（唯一 canonical 来源，
+# read_wav / SAMPLE_RATE 的真实定义在 core.audio（唯一 canonical 来源，
 # 避免两处定义不一致）。这里 re-export 只为兼容旧导入路径：
-# ``from midea_qiji.gate import read_wav``。
+# ``from core.embeddings import read_wav``。
 # ``# noqa: F401`` 告诉 linter："这个 import 确实没在本文件直接用，但别报未使用"。
-from midea_qiji.audio import SAMPLE_RATE, read_wav  # noqa: F401  (re-export)
+from core.audio import SAMPLE_RATE, read_wav  # noqa: F401  (re-export)
 
 # 每个声纹模型贡献 16 维门控特征（顺序与训练端 sv_backend/extract_features.py
 # 严格一致——特征协议不能改，否则 MLP 见到的分布与训练时不同，会整体失效）：
@@ -168,7 +168,7 @@ class ModelScopeEmbedder:
       embedding；换模型（ERes2NetV2 / CAM++）不改变调用代码——这正是
       面向对象封装的价值：把"哪个模型、在哪台设备"这些变化关进一个类；
     - 重型依赖延迟导入：modelscope / torch 只在构造函数与提取函数内部
-      import（见下方注释），保证 ``import midea_qiji.gate`` 本身不需要
+      import（见下方注释），保证 ``import core.gate`` 本身不需要
       安装这些包（--help、numpy-only 单元测试都能跑）；
     - 批量按"帧数"分组：embedding 模型要求同一批 feature 在时间维等长
       才能 cat 拼接，而不同时长音频的帧数不同，故先按帧数分组再分小批；
@@ -224,7 +224,7 @@ class ModelScopeEmbedder:
         """对已提取的声学特征批量前向 embedding_model，输出 L2 归一化 embedding。
 
         与 :meth:`prepare_waveforms` 配套：调用方先 prepare 一次，再把同一份
-        特征分别喂给两个前端的 extract_features（见 szy.pipeline.FusionGate）。
+        特征分别喂给两个前端的 extract_features（见 pipeline.pipeline.FusionGate）。
         """
         if not features:
             return []
@@ -295,8 +295,8 @@ class DualMLPGate:
         # resolve_model_path 把 ModelScope 模型名解析到本地缓存路径
         # （model_root 指向缓存根目录，支持离线/固定版本）。它本身是轻量
         # 模块，与 torch 一起延迟导入，让本模块顶层只依赖 numpy 与
-        # midea_qiji.audio。
-        from midea_qiji.paths import resolve_model_path
+        # core.audio。
+        from core.model_paths import resolve_model_path
 
         self.threshold = threshold
         # 两个前端：ERes2NetV2（sv，主模型）与 CAM++（cam，辅助模型），

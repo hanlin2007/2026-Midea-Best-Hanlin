@@ -1,4 +1,4 @@
-"""midea_qiji.paths：仓库内模型路径常量与本地模型解析。
+"""core.paths：仓库内模型路径常量与本地模型解析。
 
 ``resolve_model_path`` 是唯一合法的"模型 id → 本地路径"解析入口：优先直接
 路径，其次 --model-root / MODELSCOPE_CACHE，最后 models/modelscope 与
@@ -30,10 +30,10 @@ from pathlib import Path  # 面向对象的路径类型：拼接、存在性判�
 # 为什么用 __file__ 推算而不是写死绝对路径：仓库可能被 clone 到任何位置，
 # 写死 "E:/xxx" 在别人机器上必然失效；从本文件位置出发逐级向上找，则无论
 # 从哪个工作目录启动 Python 都能定位到同一个目录。
-# 逐级拆解（源码树布局为 <仓库根>/src/midea_qiji/paths.py）：
+# 逐级拆解（源码树布局为 <仓库根>/src/core/paths.py）：
 #   Path(__file__)     -> 本文件路径（可能是相对路径）
 #   .resolve()         -> 绝对路径，同时展开符号链接
-#   .parents           -> 逐级父目录序列：parents[0]=src/midea_qiji，
+#   .parents           -> 逐级父目录序列：parents[0]=src/core，
 #                        parents[1]=src，parents[2]=仓库根
 #   / "model"          -> Path 的 / 运算符拼接路径（自动带分隔符）
 # 注意：该常量以"源码树方式运行"（PYTHONPATH=src）为前提；若把包 pip

@@ -1,17 +1,17 @@
 """目标说话人语音指令识别管线引擎（SZY/LSZ 系统核心模块，无 CLI）。
 
 本模块实现整条生产链路的全部决策逻辑（配置、声学路由、融合门控、
-逐样本处理），入口命令行放在 :mod:`szy.cli`，与引擎分离，方便脚本/测试
+逐样本处理），入口命令行放在 :mod:`pipeline.cli`，与引擎分离，方便脚本/测试
 直接 import 引擎。（"无 CLI"是刻意分工：引擎只管"怎么做"，命令行只管
-"接用户输入"；这样测试可以绕过 argparse 直接构造 SzyRunner，脚本也能
+"接用户输入"；这样测试可以绕过 argparse 直接构造 PipelineRunner，脚本也能
 复用同一引擎。）
 
 模块内部四件套，自上而下组装：
-  - :class:`SzyConfig`   frozen dataclass 配置：全部可调参数都在这里；
+  - :class:`PipelineConfig`   frozen dataclass 配置：全部可调参数都在这里；
   - :class:`AsrCache`    ASR 转写缓存：同一音频在同一解码配置下只解码一次；
   - :class:`FusionGate`  融合门控打分器：一次调用产出"接受判定 + 融合分 +
                          特征明细"三样东西；
-  - :class:`SzyRunner`   逐样本执行器：把"声学路由 → 门控 → 转写 → 选择 →
+  - :class:`PipelineRunner`   逐样本执行器：把"声学路由 → 门控 → 转写 → 选择 →
                          后处理"整段决策串起来，并负责异常回退。
 
 生产链路一句话：
@@ -36,7 +36,7 @@
 1. 主门控 = 两个 ERes2NetV2 前端的线性融合门控（官方预训练 + 分离域微调，
    dataset_dasynth ep6），6 维余弦特征，阈值在 dasynth valid 上标定；
    两个前端共享同一次 Fbank 声学特征（prepare_waveforms 只跑一遍）。
-2. 指令路由 = 声学单双人分类（szy.single_speaker，纯波形特征、不花 ASR）：
+2. 指令路由 = 声学单双人分类（pipeline.single_speaker，纯波形特征、不花 ASR）：
    双单人走 raw/余弦短路；单人指令解码原始音频；双人指令恒切分离通道，
    ft 直接余弦选源、且只解码选中的那一路（延迟解码，省一半命令 ASR）。
 3. 所有承载决策的转写一律 ELM 关闭（temporary_elm_weight(0.0)），
@@ -44,7 +44,7 @@
    对最终通道各跑一次。唤醒与命令共享同一份 AED 权重（峰值显存
    4818 MiB，约为双实例时代的 2/3）。
 
-依赖方向：本模块只允许向下依赖 szy/（共享工具）与 midea_qiji/（内核）；
+依赖方向：本模块只允许向下依赖 szy/（共享工具）与 core/（内核）；
 torch 分离器在运行时按需延迟导入（保证无 torch 环境也能 --help / 单测）。
 """
 # 未来式注解（PEP 604）：让 str | None、tuple[...] 这类新式类型标注在
@@ -60,21 +60,21 @@ from typing import Any                           # 动态类型字段的占位�
 
 import numpy as np                              # 向量化数值计算（点积 / 矩阵乘）
 
-# ---- midea_qiji 内核（下层依赖，声纹/识别/数据模型/决策规则） ----
-from midea_qiji.firered_nbest import conservative_mbr_rerank
-from midea_qiji.gate import ModelScopeEmbedder, read_wav
-from midea_qiji.infer import (
+# ---- core 内核（下层依赖，声纹/识别/数据模型/决策规则） ----
+from core.nbest import conservative_mbr_rerank
+from core.embeddings import ModelScopeEmbedder, read_wav
+from core.samples import (
     Sample,
     submission_id,
     suppress_model_output,
 )
-from midea_qiji.moss_candidate import select_wake_anchor
-from midea_qiji.paths import resolve_model_path
-from midea_qiji.recognizers import FireRedLLMRecognizer, FireRedRecognizer
-from midea_qiji.text import normalize_transcript
+from core.wake_anchor import select_wake_anchor
+from core.model_paths import resolve_model_path
+from core.firered import FireRedLLMRecognizer, FireRedRecognizer
+from core.text import normalize_transcript
 # ---- szy 共享工具（同层 helpers + 声学单双人路由） ----
-from szy.helpers import separation_paths_for
-from szy.single_speaker import BothSingleRouter
+from pipeline.helpers import separation_paths_for
+from pipeline.single_speaker import BothSingleRouter
 
 # 融合门控使用的 6 维特征名（顺序固定，与 model/artifacts/gate_fusion.json 一致，
 # 顺序不符会直接报错，防止门控权重与特征错位）。
@@ -90,15 +90,15 @@ FUSION_FEATURE_KEYS = [
 
 
 @dataclass(frozen=True)
-class SzyConfig:
+class PipelineConfig:
     """生产管线配置（frozen dataclass：一次加载后不可变，防止运行中被误改）。
 
     frozen 的动机：配置是一次性"契约"——整个评测批次期间，阈值、模型
     路径必须保持同一份，否则前半批与后半批口径不一致、结果无法复现。
     frozen 后对字段赋值会当场抛 FrozenInstanceError，把误改挡在运行时，
     而不是让 bug 悄悄流进结果。想"改一个字段得到新配置"，用
-    ``SzyConfig(**{**old.__dict__, "字段": 新值})`` 的"复制+覆盖"惯用法
-    （见 szy.cli 对 --model-root 的处理）：``__dict__`` 取出全部字段值
+    ``PipelineConfig(**{**old.__dict__, "字段": 新值})`` 的"复制+覆盖"惯用法
+    （见 pipeline.cli 对 --model-root 的处理）：``__dict__`` 取出全部字段值
     组成字典，展开后覆盖个别键，再重新构造——旧实例保持原样，新实例
     只差一个字段。
 
@@ -156,20 +156,20 @@ class SzyConfig:
     command_switch_mode: str = "timbre_rule"
     # ---- 声学单双人路由（双单人独立短路；生产显式开启） ----
     both_single_mode: str = "off"         # "off"（严格复现历史 V100）or "sft_raw_cosine"
-    both_single_backend: str = "configs/moss_single_speaker_router_v2.json"  # 20 维 logistic 分类器 bundle
+    both_single_backend: str = "configs/single_speaker_router.json"  # 20 维 logistic 分类器 bundle
     both_single_sft_threshold: float = 0.29  # 双单人分支的同人余弦阈值
     # ---- 分离器 ----
     moss_model: str = "model/artifacts/mossformer2_dasynth_sweep_ep6.pt"  # dasynth 微调分离器权重
     # ---- 输出口径 ----
     id_mode: str = "relative_stem"        # 样本 id 生成方式（竞赛提交格式要求）
-    separation_cache: str = "outputs/szy_cache/separation"  # 分离结果 wav 缓存目录
+    separation_cache: str = "outputs/cache/separation"  # 分离结果 wav 缓存目录
     batch_writes: int = 100               # 每累计 N 条新结果写一次盘（checkpoint/ASR 缓存粒度）
     # False 时只保留进程内 ASR 缓存（供同一条音频的 N-best 复用），
     # 不读写 asr_cache.json（交付/评测口径：结果只依赖当次运行）
     asr_cache_persistent: bool = True
 
 
-def load_config(path: str | Path) -> SzyConfig:
+def load_config(path: str | Path) -> PipelineConfig:
     """从 JSON 加载配置；出现配置类里没有的键时立即报错（拼写检查器）。
 
     "拼写检查器"的意义：JSON 里把 fusion_threshold 误写成
@@ -182,7 +182,7 @@ def load_config(path: str | Path) -> SzyConfig:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     # __dataclass_fields__：dataclass 自动维护的"字段名 → Field 元信息"表，
     # 取其键就是全部合法配置项
-    fields = SzyConfig.__dataclass_fields__
+    fields = PipelineConfig.__dataclass_fields__
     # 集合差集：payload 有、字段表没有的键 = 拼写错误或过时配置项；
     # sorted 让报错信息稳定可读（集合本身无序）
     unknown = sorted(set(payload) - set(fields))
@@ -190,14 +190,14 @@ def load_config(path: str | Path) -> SzyConfig:
         raise ValueError(f"unknown config keys: {unknown}")
     # **payload 把 JSON 键值对展开为关键字参数构造配置对象；
     # 未提供的字段自动使用类里的默认值——所以 JSON 只需写要改的项
-    return SzyConfig(**payload)
+    return PipelineConfig(**payload)
 
 
 def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     """L2 归一化向量间的余弦相似度（embedding 已归一化时即点积）。
 
     余弦相似度定义 = 点积 / (两向量模长之积)。ERes2NetV2 前端输出的
-    embedding 已经 L2 归一化（模长 = 1，见 midea_qiji.gate），分母恒为 1，
+    embedding 已经 L2 归一化（模长 = 1，见 core.gate），分母恒为 1，
     因此这里只剩点积。np.dot 对一维数组 = 逐元素相乘再求和；用 numpy
     一行表达而不是 Python for 循环，是"向量化"：循环在 C 层批量执行，
     快几个数量级。
@@ -299,7 +299,7 @@ class FusionGate:
     ) -> None:
         # 延迟导入 torch：本模块顶部不 import torch，只有真正构造门控
         # （= 真正要跑推理）时才需要。好处：无 torch 的环境也能
-        # import szy.pipeline、跑 --help 和单测。import 语句写在函数体内，
+        # import pipeline.pipeline、跑 --help 和单测。import 语句写在函数体内，
         # 执行时机就从"模块导入时"推迟到"函数被调用时"
         import torch
 
@@ -403,7 +403,7 @@ class FusionGate:
         return _cosine(wake_embedding, command_embedding)
 
 
-class SzyRunner:
+class PipelineRunner:
     """逐样本管线执行器：声学路由 → 门控 → 选择 → 后处理，异常一律回退原始转写。
 
     一个 runner 实例绑定一份配置与一个输出目录，对每个 :class:`Sample`
@@ -415,10 +415,10 @@ class SzyRunner:
     时间会几乎全耗在加载上——"加载一次、复用多次"是批处理系统的通则。
     """
 
-    def __init__(self, config: SzyConfig, output_dir: Path) -> None:
+    def __init__(self, config: PipelineConfig, output_dir: Path) -> None:
         self.config = config
         self.output_dir = output_dir
-        # 分离缓存目录：配置里常写相对路径（outputs/szy_cache/separation），
+        # 分离缓存目录：配置里常写相对路径（outputs/cache/separation），
         # 这里统一转成"当前工作目录下的绝对路径"。为什么必须统一：
         # 缓存命中的前提是路径每次都能对上；相对路径随启动目录漂移，
         # 会造成"明明缓存过却找不到、反复重算"
@@ -463,12 +463,12 @@ class SzyRunner:
                 flush=True,
             )
 
-        # 分离器延迟导入：szy.separator 依赖 torch + vendor 模型定义，
+        # 分离器延迟导入：pipeline.separator 依赖 torch + vendor 模型定义，
         # 延迟到构造时再 import，保证 --help / 单测在无 torch 环境可用。
         # 注意 import 位置的语义：顶层 import 在"模块被 import"时执行，
         # 函数体内 import 在"函数被调用"时执行——这里推迟的是 torch 依赖
         print("[初始化] 加载 MossFormer2 分离器...", flush=True)
-        from szy.separator import MossFormer2Separator
+        from pipeline.separator import MossFormer2Separator
 
         self.separator = MossFormer2Separator(config.moss_model, config.device)
         print("[初始化] ✓ MossFormer2 分离器加载完成", flush=True)
@@ -558,7 +558,7 @@ class SzyRunner:
             return [r for _, r in sorted(results, key=lambda x: x[0])]
 
         # 未命中的批量送解码；uttid 用下标生成，行序按 uttid 重排回输入序
-        utterance_ids = [f"szy_{index}" for index in range(len(uncached_paths))]
+        utterance_ids = [f"utt_{index}" for index in range(len(uncached_paths))]
         with suppress_model_output():
             rows = asr_instance._model.transcribe(utterance_ids, [str(path) for path in uncached_paths])
         mapped = {str(row.get("uttid")): row for row in rows}
@@ -861,7 +861,7 @@ class SzyRunner:
             command0: dict[str, Any] | None = None
             command1: dict[str, Any] | None = None
             # 门控唤醒锚点：生产同一规则（一路为空回退原始 kws；拼音
-            # 相似度打平也回退原始 kws——规则见 midea_qiji.moss_candidate）
+            # 相似度打平也回退原始 kws——规则见 core.moss_candidate）
             # 注：曾验证"非空通道直选"（PR/CER 更优），但在计分公式
             # (1−CER+RR)/2 下 RR 权重高，raw 回退版公式分更高
             #（0.7977 vs 0.7939），故保持 raw 回退。
